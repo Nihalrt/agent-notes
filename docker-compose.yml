@@ -1,0 +1,30 @@
+services:
+  # 1. Relational Database: Stores users, login sessions, and the final processed notes
+  postgres:
+    image: postgres:15-alpine
+    container_name: notes-postgres
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password123
+      POSTGRES_DB: agent_notes_db
+    ports:
+      - "5433:5432" # Maps port 5433 on your Mac to port 5432 inside the container to avoid local conflicts
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  # 2. Vector Database: The "Long Term Memory" for your Knowledge Archivist Agent
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: notes-chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  chroma_data:
