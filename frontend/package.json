@@ -1,4 +1,8 @@
 {
+  "scripts": {
+    "start": "expo start",
+    "web": "expo start --web"
+  },
   "dependencies": {
     "@expo-google-fonts/inter": "^0.4.2",
     "@expo-google-fonts/jetbrains-mono": "^0.4.1",

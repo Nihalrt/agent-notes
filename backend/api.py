@@ -5,28 +5,21 @@ from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, String, Text, DateTime
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import create_engine, Column, String, Text, DateTime, desc, select
+from sqlalchemy.orm import sessionmaker, declarative_base
 import chromadb
 from crewai import Agent, Task, Crew, Process, LLM
-from crewai.tools import tool
 
-# Environment setup and privacy
-os.environ["CREWAI_DISABLE_TELEMETRY"] = "True"
+# 1. ENVIRONMENT SETUP & PRIVACY
+os.environ["CREWAI_DISABLE_TELEMETRY"] = "true"
 
-# Model Setup
-"""
- Creating a local object that connects to Ollama via a HTTP protocol so that the agents can use llama3 model for processing tasks, the port points to 11434
-
-"""
+# 2. LOCAL LLM CONFIGURATION
 local_llm = LLM(
     model="ollama/llama3",
     base_url="http://localhost:11434"
 )
 
-# DATABASE SETUP
-# Relational Database SQLAlchemy setup
+# 3. DATABASE SETUP (POSTGRESQL & CHROMADB)
 DATABASE_URL = "postgresql://admin:password123@localhost:5433/agent_notes_db"
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -41,89 +34,95 @@ class DBNote(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# Vector Db Setup for context agent
-# establish a connection to the ChromeDB
-# Create an index in the db to store and for mathematical lookups for the context agent to use for historical context.
-chrome_client = chromadb.HttpClient(host="localhost", port=8000)
-collection = chrome_client.get_or_create_collection("user_knowledge_vault")
+# NOTE: metadata={"hnsw:space": "cosine"} only takes effect the FIRST time this
+# collection is created. If you already have an existing collection from earlier
+# testing, run scripts/reset_vector_db.py once to recreate it cleanly on cosine
+# distance before this matters.
+chroma_client = chromadb.HttpClient(host="localhost", port=8000)
+collection = chroma_client.get_or_create_collection(
+    name="user_knowledge_vault",
+    metadata={"hnsw:space": "cosine"}
+)
+
+# How close a past note must be to count as "relevant" (cosine distance:
+# 0.0 = identical, ~1.0 = unrelated). Start at 0.3. Watch the [RAG] debug
+# line printed to your terminal on each request — if genuinely relevant
+# notes are getting filtered out, raise this; if irrelevant ones are still
+# leaking through, lower it.
+RELEVANCE_THRESHOLD = 0.3
 
 
-# LOCAL OLLAMA EMBEDDING HELPER
-def get_local_ollama_embedding(text):
-    """
-    This function sends a request to the local Ollama server to get embeddings for the provided text.
-    It uses the 'ollama/embeddings' endpoint and returns the embedding vector.
-    """
+# 4. LOCAL OLLAMA EMBEDDING HELPER
+def get_local_embedding(text: str):
     try:
         response = requests.post(
             "http://localhost:11434/api/embeddings",
             json={"model": "nomic-embed-text", "prompt": text}
         )
-        response.raise_for_status()  # Raise an error for bad responses
-        return response.json().get("embedding")
+        response.raise_for_status()
+        return response.json()["embedding"]
     except Exception as e:
-        print(f"Error fetching embedding: {e}")
-        return [0.0] * 768  # Return a zero vector of size 768 as a fallback
+        print(f"Error generating embedding: {e}")
+        return [0.0] * 768
 
-# # CUSTOM CREWAI LOCAL DB LOOKUP TOOL
-# @tool("Search Past Notes Vault") # converts into a format that the crewAI can read and understand
-# def search_past_notes_vault(query: str) -> str:
-#     """
-#     When the agent is looking up for any historical context, it takes in text as query, calls in collection.query() to lookup in the vector db and
-#     returns similar concepts from the past as a text."""
-#     query_vector = get_local_ollama_embedding(query)
-#     results = collection.query(
-#         query_embeddings=[query_vector],
-#         n_results=3  # number of similar results to return
-#     )
-#     documents = results.get("documents", [[]])[0]  # Get the first list of documents
-#     if not documents:
-#         return "No relevant historical context found."
-    
-#     context = "\n\n---\n\n".join(documents)
-#     return f"Relevant historical context:\n\n{context}"
 
-app = FastAPI(Title="Autonomous Notes Taker")
-# This basically initializes the FastAPI server instance to accept any network traffic (React Native, Flutter, Web, etc.) to access the API endpoints.
-# CORS = Cross-Origin Resource Sharing, allows apis to be accessed from different domains.
+# 5. INITIALIZE FASTAPI & CORS
+app = FastAPI(title="Autonomous Action Note-Taker API")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"]
+    allow_headers=["*"],
 )
 
+
+# 6. PYDANTIC REQUEST SCHEMA
 class NoteRequest(BaseModel):
     content: str
 
+
+# 7. PROCESS ENDPOINT (THE AGENT ORCHESTRATOR WITH THRESHOLDED RAG & PROMPT HARDENING)
 @app.post("/notes/process")
 def process_note(request: NoteRequest):
     raw_text = request.content
     if not raw_text.strip():
         raise HTTPException(status_code=400, detail="Note content cannot be empty.")
-    
+
+    # A. PROGRAMMATIC RAG LOOKUP — now with a relevance threshold instead of
+    # blindly trusting the top 3 nearest neighbors.
     try:
-        query_vector = get_local_ollama_embedding(raw_text)
+        query_vector = get_local_embedding(raw_text)
         results = collection.query(
             query_embeddings=[query_vector],
-            n_results=3
+            n_results=3,
+            include=["documents", "distances"]
         )
         documents = results.get("documents", [[]])[0]
-        if documents:
-            retrieved_context = "\n\n---\n\n".join(documents)
-        else:
-            retrieved_context = "No relevant historical context found."
-    except Exception as e:
-        print(f"Error during vector search: {e}")
-        retrieved_context = "Error retrieving historical context."
+        distances = results.get("distances", [[]])[0]
 
-    # A. Define Agents with local LLM
+        print(f"[RAG] distances for this query: {distances}")
+
+        relevant_documents = [
+            doc for doc, dist in zip(documents, distances)
+            if dist <= RELEVANCE_THRESHOLD
+        ]
+
+        if relevant_documents:
+            retrieved_context = "\n\n---\n\n".join(relevant_documents)
+        else:
+            retrieved_context = "No closely related past notes were found in the database archive."
+    except Exception as e:
+        print(f"ChromaDB lookup failed: {e}")
+        retrieved_context = "Database archive is currently unavailable."
+
+    # B. HARDENED AGENTS
     extractor_agent = Agent(
         role='Action Item Extractor',
-        goal='Identify all implicit and explicit tasks, deadlines, and action items from raw notes.',
-        backstory="""You are a meticulous Project Manager. You read messy meeting thoughts and 
-        extract what must be done, who is assigned, and any deadlines.""",
+        goal='Extract all tasks, deadlines, and assignees ONLY from the CURRENT raw notes. Never invent tasks. Never include tasks from historical context.',
+        backstory="""You are a strict, data-extraction algorithm. You read input text and extract action items into a clean markdown list. 
+        You DO NOT output conversational filler. You DO NOT say "Here are the items". You output ONLY the list.""",
         verbose=True,
         allow_delegation=False,
         llm=local_llm
@@ -131,9 +130,10 @@ def process_note(request: NoteRequest):
 
     context_agent = Agent(
         role='Knowledge Archivist',
-        goal='Utilize tools to search the past database archive, find historical context, and connect notes.',
-        backstory="""You are an expert Research Archivist. You use database query tools to hunt down 
-        past notes related to current topics to ensure the company never repeats mistakes or loses context.""",
+        goal='Analyze historical notes and write a strictly factual summary of how they relate to the current note. Never generate new action items.',
+        backstory="""You are a research archivist. You read past notes and synthesize connections to current notes. 
+        You output pure, factual summaries. You NEVER use conversational filler like "Here is the summary".
+        You NEVER produce a bulleted task list of your own — that is not your job.""",
         verbose=True,
         allow_delegation=False,
         llm=local_llm
@@ -141,88 +141,188 @@ def process_note(request: NoteRequest):
 
     drafter_agent = Agent(
         role='Executive Communications Director',
-        goal='Synthesize raw text, action items, and retrieved database context into a clean, professional summary.',
-        backstory="""You rewrite messy content into elegant, executive-ready Markdown files with clear headings.""",
+        goal='Take the provided data and format it EXACTLY according to the strict Markdown template, without merging, reassigning, or inventing content between sections.',
+        backstory="""You are an automated document formatter. You take input text and place it into a rigid Markdown template.
+        You copy the Extractor's output into Action Items and the Archivist's output into Historical Context, verbatim in substance.
+        You NEVER move content between those two sections, and you NEVER invent new details for the summary paragraph
+        that are not present in the current raw note or in the Extractor/Archivist outputs you were given.
+        You absolutely NEVER add pleasantries, greetings, sign-offs, or conversational text. You DO NOT say "Here is the document." 
+        You output NOTHING but the final Markdown document.""",
         verbose=True,
         allow_delegation=False,
         llm=local_llm
     )
 
-    # B. Define Tasks with dependencies
+    # C. HARDENED TASKS
     extract_task = Task(
-        description=f"Analyze these notes and extract a clean list of action items: \n\n{raw_text}",
-        expected_output="A formatted bulleted markdown list of action items, assignees, and deadlines.",
+        description=f"""Extract a clean list of action items from ONLY this current note:
+        {raw_text}
+
+        CRITICAL RULES:
+        - Do NOT extract action items from any past historical context, even if you happen to know about it.
+        - Do NOT invent people, tasks, or deadlines that are not explicitly stated in the note above.
+        - If the note contains no clear action items, output "No action items identified." and nothing else.
+        Output ONLY a bulleted markdown list (or the single line above if there is nothing to extract).""",
+        expected_output="A bulleted markdown list of action items drawn strictly from the current note. Zero conversational text.",
         agent=extractor_agent
     )
 
     context_task = Task(
-        description=f"""Analyze the current raw notes:
+        description=f"""Analyze the current note:
         {raw_text}
-        
-        Compare them with the following relevant past notes retrieved from our database archive:
+
+        Compare it with the following past notes retrieved from our archive:
         {retrieved_context}
-        
-        Summarize the connections between the past notes and current notes.""", # <-- Updated to inject retrieved_context directly
-        expected_output="A markdown summary of matched historical references and how they relate to the current notes.",
+
+        CRITICAL RULES:
+        - Only describe a connection if it is clearly and specifically relevant to the current note.
+        - If nothing retrieved is genuinely relevant, output "No relevant historical context found." and nothing else.
+        - Do NOT produce action items here. This section is historical reference only, not tasks.
+        Summarize the historical connections in plain prose or a short bulleted list.""",
+        expected_output="A brief markdown summary of genuinely relevant historical references, or a single line stating none were found. Zero conversational text. No action items.",
         agent=context_agent
     )
 
     draft_task = Task(
-        description="""Take the raw notes, the extracted action items, and the retrieved context, and combine them into a single, polished Markdown document.
-        Use the following structure:
+        description=f"""Combine the data into a single Markdown document.
+        You MUST output ONLY the markdown. DO NOT output any other text before or after the markdown.
+        Use EXACTLY this structure:
+
         # Meeting Summary
-        [1 paragraph overview]
-        
+        [Write a 1-paragraph overview based STRICTLY on this current note: "{raw_text}" — and on the Extractor/Archivist outputs you were given. Do not introduce any topic, technology, or detail that is not present in the current note or in those two outputs.]
+
         ## Action Items
-        [From Extractor]
-        
+        [Insert the exact output from the Extractor Agent here — nothing from the Archivist's output belongs in this section]
+
         ## Historical Context Retrieved
-        [From Archivist]""",
-        expected_output="A fully polished executive Markdown note.",
+        [Insert the exact output from the Context Agent here — nothing from the Extractor's output belongs in this section]
+
+        STRICT RULES:
+        - Do not merge, blend, or move content between the Action Items and Historical Context sections.
+        - Do not add any new action items of your own.
+        - The summary paragraph must not mention anything (technologies, people, causes) that is absent from the current raw note.
+        - Do not add a preamble ("Here is...") or a sign-off ("Let me know if...") of any kind.
+        - If a section has nothing to show, write "None." under that heading rather than omitting or inventing content.
+        """,
+        expected_output="A strict Markdown document matching the exact structure requested, with cleanly separated sections and a summary grounded only in the current note. ZERO conversational text.",
         agent=drafter_agent,
         context=[extract_task, context_task]
     )
 
-    # C. Run CrewAI Workflow
+    # D. RUN CREW
     crew = Crew(
         agents=[extractor_agent, context_agent, drafter_agent],
         tasks=[extract_task, context_task, draft_task],
         process=Process.sequential,
         verbose=True
     )
+    
+    processed_result = str(crew.kickoff())
 
-    # run agents and retrive the output 
-    final_output = str(crew.kickoff())
-
-    # D. Save that refined draft permanently in the db
+    # E. SAVE TO POSTGRES
     note_id = str(uuid.uuid4())
-    db_session = SessionLocal()
+    db = SessionLocal()
     try:
         new_note = DBNote(
             id=note_id,
             raw_content=raw_text,
-            processed_content=final_output
+            processed_content=processed_result
         )
-        db_session.add(new_note)
-        db_session.commit()
+        db.add(new_note)
+        db.commit()
     except Exception as e:
-        print(f"Error saving note to database: {e}")
+        print(f"Error saving to Postgres: {e}")
     finally:
-        db_session.close()
-    
-    # E. Adding the proccessed note to the ChromeDb Vector for future searches
+        db.close()
+
+    # F. SAVE TO CHROMADB
     try:
-        embedding = get_local_ollama_embedding(final_output)
+        embedding = get_local_embedding(raw_text)
         collection.add(
-            documents=[final_output],
-            metadatas=[{"created_at": str(datetime.utcnow())}],
             embeddings=[embedding],
-            ids=[note_id]
+            documents=[raw_text],
+            ids=[note_id],
+            metadatas=[{"created_at": str(datetime.utcnow())}]
         )
     except Exception as e:
-        print(f"Error adding note to vector database: {e}")
-    
-    return {"note_id": note_id, "processed_note": final_output}
+        print(f"Error adding to ChromaDB: {e}")
+
+    return {
+        "note_id": note_id,
+        "processed_note": processed_result
+    }
+
+
+# 8. HEALTH CHECK — lets the frontend show a live connection indicator.
+@app.get("/health")
+def health():
+    try:
+        db = SessionLocal()
+        db.execute(select(1))
+        db.close()
+        db_ok = True
+    except Exception:
+        db_ok = False
+    return {"status": "ok" if db_ok else "degraded", "database": db_ok}
+
+
+# 9. LIST / READ / DELETE — the process endpoint above never gave the
+# frontend a way to reload note history, so a page refresh silently lost
+# everything. These make notes durable across sessions.
+@app.get("/notes")
+def list_notes():
+    db = SessionLocal()
+    try:
+        rows = db.query(DBNote).order_by(desc(DBNote.created_at)).all()
+        return [
+            {
+                "note_id": row.id,
+                "raw_content": row.raw_content,
+                "processed_note": row.processed_content,
+                "created_at": row.created_at,
+            }
+            for row in rows
+        ]
+    finally:
+        db.close()
+
+
+@app.get("/notes/{note_id}")
+def get_note(note_id: str):
+    db = SessionLocal()
+    try:
+        row = db.query(DBNote).filter(DBNote.id == note_id).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Note not found.")
+        return {
+            "note_id": row.id,
+            "raw_content": row.raw_content,
+            "processed_note": row.processed_content,
+            "created_at": row.created_at,
+        }
+    finally:
+        db.close()
+
+
+@app.delete("/notes/{note_id}")
+def delete_note(note_id: str):
+    db = SessionLocal()
+    try:
+        row = db.query(DBNote).filter(DBNote.id == note_id).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Note not found.")
+        db.delete(row)
+        db.commit()
+    finally:
+        db.close()
+
+    try:
+        collection.delete(ids=[note_id])
+    except Exception as e:
+        print(f"ChromaDB delete failed for {note_id}: {e}")
+
+    return {"note_id": note_id, "deleted": True}
+
 
 if __name__ == "__main__":
     import uvicorn

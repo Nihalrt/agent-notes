@@ -17,6 +17,16 @@ module.exports = {
         peachDeep: "#9A6A1E",
         sky: "#C4E1F0",
         skyDeep: "#2C6C8C",
+        // Signature accent — used sparingly for primary actions, the brand
+        // mark, and active nav states, so it reads as intentional rather
+        // than "default blue button" of a starter template.
+        flare: "#FF6B4A",
+        flareDeep: "#B84422",
+        // Dark shell colors for the sidebar/nav chrome, kept separate from
+        // "ink" (body text on paper) so the two surfaces have real contrast.
+        shell: "#15141A",
+        shellLine: "#28262F",
+        shellFaint: "#8D8A96",
       },
       fontFamily: {
         display: ["SpaceGrotesk_700Bold"],
