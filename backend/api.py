@@ -1,11 +1,15 @@
 import os
+import re
 import uuid
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, String, Text, DateTime, desc, select
+from sqlalchemy import (
+    create_engine, Column, String, Text, DateTime, JSON, desc, select, text,
+)
 from sqlalchemy.orm import sessionmaker, declarative_base
 import chromadb
 from crewai import Agent, Task, Crew, Process, LLM
@@ -15,7 +19,7 @@ os.environ["CREWAI_DISABLE_TELEMETRY"] = "true"
 
 # 2. LOCAL LLM CONFIGURATION
 local_llm = LLM(
-    model="ollama/llama3",
+    model="ollama/mistral",
     base_url="http://localhost:11434"
 )
 
@@ -31,8 +35,18 @@ class DBNote(Base):
     raw_content = Column(Text, nullable=False)
     processed_content = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # tags: list[str] set by the tagging step. action_items: list[{text, done}]
+    # parsed from the Extractor's output so the frontend can render checkboxes.
+    tags = Column(JSON)
+    action_items = Column(JSON)
 
 Base.metadata.create_all(bind=engine)
+
+# create_all() never ALTERs an existing table, and the notes table predates the
+# tags/action_items columns, so add them idempotently for older databases.
+with engine.begin() as conn:
+    conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS tags JSON"))
+    conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS action_items JSON"))
 
 # NOTE: metadata={"hnsw:space": "cosine"} only takes effect the FIRST time this
 # collection is created. If you already have an existing collection from earlier
@@ -64,6 +78,91 @@ def get_local_embedding(text: str):
     except Exception as e:
         print(f"Error generating embedding: {e}")
         return [0.0] * 768
+
+
+# 4b. STRUCTURED EXTRACTION HELPERS
+# The crew emits a fixed Markdown shape; these turn the relevant parts into
+# structured data (checkable action items, topic tags) for the frontend.
+NONE_PLACEHOLDER = re.compile(r"^(none\.?|no action items?.*|n/a)$", re.I)
+LOCAL_MODEL = "mistral"  # keep in sync with the local_llm config above
+
+
+def parse_action_items(markdown: str):
+    """Pull the '## Action Items' section out of the processed markdown into a
+    list of {text, done} dicts. Handles both bulleted and plain-line output."""
+    if not markdown:
+        return []
+    items = []
+    in_section = False
+    for raw_line in markdown.split("\n"):
+        line = raw_line.strip()
+        if line.startswith("## "):
+            in_section = line[3:].strip().lower().startswith("action items")
+            continue
+        if line.startswith("# "):
+            in_section = False
+            continue
+        if not in_section or not line:
+            continue
+        bullet = re.match(r"^[-*+]\s+(.*)$", line)
+        candidate = bullet.group(1).strip() if bullet else line
+        candidate = candidate.replace("**", "").strip()
+        if not candidate or NONE_PLACEHOLDER.match(candidate):
+            continue
+        items.append({"text": candidate, "done": False})
+    return items
+
+
+def generate_tags(raw_text: str):
+    """Ask the local model for 1-4 short topic tags. Deliberately resilient:
+    any failure or garbage output falls back to an empty list rather than
+    breaking note creation."""
+    prompt = (
+        "Read the note and output 1 to 4 short topic tags describing it.\n"
+        "Rules: lowercase, single word or hyphenated, comma-separated, "
+        "no '#', no sentences, no explanation.\n\n"
+        f"Note: {raw_text}\n\nTags:"
+    )
+    try:
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={
+                "model": LOCAL_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"num_predict": 40, "temperature": 0.1},
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        raw = response.json().get("response", "")
+    except Exception as e:
+        print(f"Tag generation failed: {e}")
+        return []
+
+    tags = []
+    for token in re.split(r"[,\n]", raw):
+        cleaned = re.sub(r"[^a-z0-9-]", "", token.strip().lower().lstrip("#"))
+        cleaned = cleaned.strip("-")
+        if cleaned and cleaned not in tags:
+            tags.append(cleaned)
+    return tags[:4]
+
+
+def serialize_note(row: "DBNote"):
+    """Shape a DB row for the API. action_items backfills from the markdown for
+    notes created before the column existed, so old notes still get checkboxes."""
+    action_items = row.action_items
+    if not action_items:
+        action_items = parse_action_items(row.processed_content)
+    return {
+        "note_id": row.id,
+        "raw_content": row.raw_content,
+        "processed_note": row.processed_content,
+        "created_at": row.created_at,
+        "tags": row.tags or [],
+        "action_items": action_items or [],
+    }
 
 
 # 5. INITIALIZE FASTAPI & CORS
@@ -219,6 +318,11 @@ def process_note(request: NoteRequest):
     
     processed_result = str(crew.kickoff())
 
+    # D2. STRUCTURED EXTRACTION — turn the markdown into checkable action items
+    # and derive topic tags for filtering/dashboard.
+    action_items = parse_action_items(processed_result)
+    tags = generate_tags(raw_text)
+
     # E. SAVE TO POSTGRES
     note_id = str(uuid.uuid4())
     db = SessionLocal()
@@ -226,7 +330,9 @@ def process_note(request: NoteRequest):
         new_note = DBNote(
             id=note_id,
             raw_content=raw_text,
-            processed_content=processed_result
+            processed_content=processed_result,
+            tags=tags,
+            action_items=action_items,
         )
         db.add(new_note)
         db.commit()
@@ -249,7 +355,9 @@ def process_note(request: NoteRequest):
 
     return {
         "note_id": note_id,
-        "processed_note": processed_result
+        "processed_note": processed_result,
+        "tags": tags,
+        "action_items": action_items,
     }
 
 
@@ -274,15 +382,7 @@ def list_notes():
     db = SessionLocal()
     try:
         rows = db.query(DBNote).order_by(desc(DBNote.created_at)).all()
-        return [
-            {
-                "note_id": row.id,
-                "raw_content": row.raw_content,
-                "processed_note": row.processed_content,
-                "created_at": row.created_at,
-            }
-            for row in rows
-        ]
+        return [serialize_note(row) for row in rows]
     finally:
         db.close()
 
@@ -294,12 +394,37 @@ def get_note(note_id: str):
         row = db.query(DBNote).filter(DBNote.id == note_id).first()
         if row is None:
             raise HTTPException(status_code=404, detail="Note not found.")
-        return {
-            "note_id": row.id,
-            "raw_content": row.raw_content,
-            "processed_note": row.processed_content,
-            "created_at": row.created_at,
-        }
+        return serialize_note(row)
+    finally:
+        db.close()
+
+
+# 9b. UPDATE — currently used to persist action-item checkbox state (and,
+# optionally, edited tags) from the frontend.
+class NoteUpdate(BaseModel):
+    action_items: Optional[List[dict]] = None
+    tags: Optional[List[str]] = None
+
+
+@app.patch("/notes/{note_id}")
+def update_note(note_id: str, update: NoteUpdate):
+    db = SessionLocal()
+    try:
+        row = db.query(DBNote).filter(DBNote.id == note_id).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Note not found.")
+        if update.action_items is not None:
+            # Normalize to the {text, done} shape and ignore anything malformed.
+            row.action_items = [
+                {"text": str(item.get("text", "")), "done": bool(item.get("done"))}
+                for item in update.action_items
+                if isinstance(item, dict) and item.get("text")
+            ]
+        if update.tags is not None:
+            row.tags = [str(t) for t in update.tags]
+        db.commit()
+        db.refresh(row)
+        return serialize_note(row)
     finally:
         db.close()
 
@@ -322,6 +447,49 @@ def delete_note(note_id: str):
         print(f"ChromaDB delete failed for {note_id}: {e}")
 
     return {"note_id": note_id, "deleted": True}
+
+
+# 10. DASHBOARD STATS — aggregate numbers for the frontend overview.
+@app.get("/stats")
+def stats():
+    db = SessionLocal()
+    try:
+        rows = db.query(DBNote).all()
+    finally:
+        db.close()
+
+    total_notes = len(rows)
+    open_items = 0
+    done_items = 0
+    tag_counts = {}
+    week_ago = datetime.utcnow() - timedelta(days=7)
+    notes_this_week = 0
+
+    for row in rows:
+        items = row.action_items or parse_action_items(row.processed_content) or []
+        for item in items:
+            if item.get("done"):
+                done_items += 1
+            else:
+                open_items += 1
+        for tag in (row.tags or []):
+            tag_counts[tag] = tag_counts.get(tag, 0) + 1
+        if row.created_at and row.created_at >= week_ago:
+            notes_this_week += 1
+
+    top_tags = sorted(
+        ({"tag": t, "count": c} for t, c in tag_counts.items()),
+        key=lambda x: x["count"],
+        reverse=True,
+    )
+
+    return {
+        "total_notes": total_notes,
+        "open_action_items": open_items,
+        "done_action_items": done_items,
+        "notes_this_week": notes_this_week,
+        "top_tags": top_tags,
+    }
 
 
 if __name__ == "__main__":
