@@ -20,6 +20,27 @@ export function extractSummary(markdown) {
   return summary.slice(0, 140);
 }
 
+// Removes a `## <heading>` section (up to the next heading) from the markdown.
+// Used to drop the "Action Items" block from the detail view, since we render
+// that section as an interactive checklist instead of static text.
+export function stripSection(markdown, heading) {
+  if (!markdown) return markdown;
+  const lines = markdown.split("\n");
+  const out = [];
+  let skipping = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("## ")) {
+      skipping = trimmed.slice(3).trim().toLowerCase() === heading.toLowerCase();
+      if (skipping) continue;
+    } else if (trimmed.startsWith("# ")) {
+      skipping = false;
+    }
+    if (!skipping) out.push(line);
+  }
+  return out.join("\n").trim();
+}
+
 // Renders **bold** spans inline within a line of text.
 function renderInline(text, keyPrefix) {
   const parts = text.split(/(\*\*[^*]+\*\*)/g).filter(Boolean);
@@ -44,6 +65,9 @@ export function MarkdownView({ text }) {
   lines.forEach((rawLine) => {
     const trimmed = rawLine.trim();
     if (trimmed === "") return;
+    // The LLM sometimes wraps its whole answer in a ```markdown code fence;
+    // drop those fence lines so they don't render as literal text.
+    if (trimmed.startsWith("```")) return;
 
     if (trimmed.startsWith("## ")) {
       blocks.push({ type: "h2", content: trimmed.slice(3) });
