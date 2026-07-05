@@ -1,9 +1,11 @@
 import axios from "axios";
 
 // Your Mac's LAN IP, not "localhost" — a phone on Expo Go can't resolve
-// "localhost" to your Mac, only to itself. Re-run `ipconfig getifaddr en0`
-// on the Mac if this ever changes (e.g. new Wi-Fi network).
-export const API_BASE = "http://192.168.1.92:8001";
+// "localhost" to your Mac, only to itself. This changes whenever your Mac
+// gets a new DHCP lease (Wi-Fi reconnect, router reboot, etc.) — re-run
+// `ipconfig getifaddr en0` and update this if the app ever shows "backend
+// offline" after working before.
+export const API_BASE = "http://192.168.1.65:8001";
 
 function mapNote(row) {
   return {
