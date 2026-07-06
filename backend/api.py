@@ -29,14 +29,13 @@ engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
+# This is quite helpful as it's an outline of what we want from the model, and it also serves as the SQLAlchemy ORM mapping for the notes table.
 class DBNote(Base):
     __tablename__ = "notes"
     id = Column(String, primary_key=True, index=True)
     raw_content = Column(Text, nullable=False)
     processed_content = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
-    # tags: list[str] set by the tagging step. action_items: list[{text, done}]
-    # parsed from the Extractor's output so the frontend can render checkboxes.
     tags = Column(JSON)
     action_items = Column(JSON)
 
