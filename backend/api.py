@@ -1,9 +1,9 @@
 import os
 import re
 import uuid
-import requests
 from datetime import datetime, timedelta
 from typing import List, Optional
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -12,19 +12,42 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import sessionmaker, declarative_base
 import chromadb
+from google import genai
+from google.genai import types as genai_types
 from crewai import Agent, Task, Crew, Process, LLM
+
+load_dotenv()  # picks up backend/.env for local dev; Render sets real env vars directly
 
 # 1. ENVIRONMENT SETUP & PRIVACY
 os.environ["CREWAI_DISABLE_TELEMETRY"] = "true"
 
-# 2. LOCAL LLM CONFIGURATION
+# 2. LLM CONFIGURATION — Gemini's free tier (no credit card required, just a
+# Google account at aistudio.google.com/apikey). CrewAI's LLM wraps LiteLLM,
+# which talks to Gemini directly given a "gemini/<model>" name + api_key.
+# Uses the current `google-genai` SDK — the older `google-generativeai`
+# package (and its text-embedding-004 model) are both deprecated.
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise RuntimeError(
+        "GEMINI_API_KEY is not set. Get a free key at "
+        "https://aistudio.google.com/apikey and put it in backend/.env "
+        "(GEMINI_API_KEY=...) for local dev, or in your Render env vars."
+    )
+genai_client = genai.Client(api_key=GEMINI_API_KEY)
+
 local_llm = LLM(
-    model="ollama/mistral",
-    base_url="http://localhost:11434"
+    model="gemini/gemini-2.5-flash",
+    api_key=GEMINI_API_KEY,
 )
 
 # 3. DATABASE SETUP (POSTGRESQL & CHROMADB)
-DATABASE_URL = "postgresql://admin:password123@localhost:5433/agent_notes_db"
+# DATABASE_URL comes from the environment in deployment (e.g. a Neon
+# connection string set on Render); falls back to the local docker-compose
+# Postgres for development.
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL",
+    "postgresql://admin:password123@localhost:5433/agent_notes_db",
+)
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -47,11 +70,13 @@ with engine.begin() as conn:
     conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS tags JSON"))
     conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS action_items JSON"))
 
-# NOTE: metadata={"hnsw:space": "cosine"} only takes effect the FIRST time this
-# collection is created. If you already have an existing collection from earlier
-# testing, run scripts/reset_vector_db.py once to recreate it cleanly on cosine
-# distance before this matters.
-chroma_client = chromadb.HttpClient(host="localhost", port=8000)
+# Embedded/persistent Chroma instead of a separate HTTP server — keeps this
+# to a single deployable process (Render's free tier only runs one service).
+# NOTE: Render's free web services have an ephemeral filesystem, so this
+# persisted data (and therefore RAG "historical context") resets on every
+# redeploy/restart. Actual notes are unaffected since those live in Postgres.
+CHROMA_PATH = os.environ.get("CHROMA_PATH", "./chroma_data")
+chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
 collection = chroma_client.get_or_create_collection(
     name="user_knowledge_vault",
     metadata={"hnsw:space": "cosine"}
@@ -65,15 +90,17 @@ collection = chroma_client.get_or_create_collection(
 RELEVANCE_THRESHOLD = 0.3
 
 
-# 4. LOCAL OLLAMA EMBEDDING HELPER
+# 4. GEMINI EMBEDDING HELPER (replaces the local Ollama nomic-embed-text call)
+# Pinned to 768 dims via output_dimensionality so it stays a drop-in swap for
+# the old Ollama embedding size the Chroma collection was already using.
 def get_local_embedding(text: str):
     try:
-        response = requests.post(
-            "http://localhost:11434/api/embeddings",
-            json={"model": "nomic-embed-text", "prompt": text}
+        result = genai_client.models.embed_content(
+            model="gemini-embedding-001",
+            contents=text,
+            config=genai_types.EmbedContentConfig(output_dimensionality=768),
         )
-        response.raise_for_status()
-        return response.json()["embedding"]
+        return result.embeddings[0].values
     except Exception as e:
         print(f"Error generating embedding: {e}")
         return [0.0] * 768
@@ -83,7 +110,6 @@ def get_local_embedding(text: str):
 # The crew emits a fixed Markdown shape; these turn the relevant parts into
 # structured data (checkable action items, topic tags) for the frontend.
 NONE_PLACEHOLDER = re.compile(r"^(none\.?|no action items?.*|n/a)$", re.I)
-LOCAL_MODEL = "mistral"  # keep in sync with the local_llm config above
 
 
 def parse_action_items(markdown: str):
@@ -113,8 +139,8 @@ def parse_action_items(markdown: str):
 
 
 def generate_tags(raw_text: str):
-    """Ask the local model for 1-4 short topic tags. Deliberately resilient:
-    any failure or garbage output falls back to an empty list rather than
+    """Ask Gemini for 1-4 short topic tags. Deliberately resilient: any
+    failure or garbage output falls back to an empty list rather than
     breaking note creation."""
     prompt = (
         "Read the note and output 1 to 4 short topic tags describing it.\n"
@@ -123,18 +149,11 @@ def generate_tags(raw_text: str):
         f"Note: {raw_text}\n\nTags:"
     )
     try:
-        response = requests.post(
-            "http://localhost:11434/api/generate",
-            json={
-                "model": LOCAL_MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "options": {"num_predict": 40, "temperature": 0.1},
-            },
-            timeout=60,
+        response = genai_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
         )
-        response.raise_for_status()
-        raw = response.json().get("response", "")
+        raw = response.text or ""
     except Exception as e:
         print(f"Tag generation failed: {e}")
         return []
@@ -493,4 +512,4 @@ def stats():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8001)))

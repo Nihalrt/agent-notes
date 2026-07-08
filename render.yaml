@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: agent-notes-api
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      # Set these in the Render dashboard after the service is created —
+      # they're secrets/connection strings and shouldn't live in the repo.
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
