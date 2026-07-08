@@ -1,11 +1,10 @@
 import axios from "axios";
 
-// Your Mac's LAN IP, not "localhost" — a phone on Expo Go can't resolve
-// "localhost" to your Mac, only to itself. This changes whenever your Mac
-// gets a new DHCP lease (Wi-Fi reconnect, router reboot, etc.) — re-run
-// `ipconfig getifaddr en0` and update this if the app ever shows "backend
-// offline" after working before.
-export const API_BASE = "http://192.168.1.65:8001";
+// EXPO_PUBLIC_API_BASE is set at build time in the GitHub Pages workflow to
+// point at the deployed Render backend. Locally (Expo Go, simulator, or
+// `expo start --web`), it falls back to your Mac's LAN IP — swap this if
+// your Mac's IP changes (check with `ipconfig getifaddr en0`).
+export const API_BASE = process.env.EXPO_PUBLIC_API_BASE || "http://192.168.1.65:8001";
 
 function mapNote(row) {
   return {

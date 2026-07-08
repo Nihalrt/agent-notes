@@ -6,6 +6,12 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "frontend", "run", "web"],
       "port": 8081
+    },
+    {
+      "name": "pages-sim",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "4321", "--directory", "/tmp/pages-sim"],
+      "port": 4321
     }
   ]
 }
