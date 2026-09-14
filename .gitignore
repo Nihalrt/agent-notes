@@ -16,3 +16,5 @@ postgres_data/
 chroma_data/
 notes-vault/
 .DS_Store
+.vercel
+.env*

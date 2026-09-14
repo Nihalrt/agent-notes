@@ -15,19 +15,13 @@ from sqlalchemy import (
 from sqlalchemy.orm import sessionmaker, declarative_base
 from google import genai
 from google.genai import types as genai_types
-from crewai import Agent, Task, Crew, Process, LLM
 
 load_dotenv()  # picks up backend/.env for local dev; Render sets real env vars directly
 
-# 1. ENVIRONMENT SETUP & PRIVACY
-os.environ["CREWAI_DISABLE_TELEMETRY"] = "true"
-CREW_VERBOSE = os.environ.get("CREW_VERBOSE", "false").lower() == "true"
-
-# 2. LLM CONFIGURATION — Gemini's free tier (no credit card required, just a
-# Google account at aistudio.google.com/apikey). CrewAI's LLM wraps LiteLLM,
-# which talks to Gemini directly given a "gemini/<model>" name + api_key.
-# Uses the current `google-genai` SDK — the older `google-generativeai`
-# package (and its text-embedding-004 model) are both deprecated.
+# 1. LLM CONFIGURATION — Gemini's free tier (no credit card required, just a
+# Google account at aistudio.google.com/apikey). Uses the current
+# `google-genai` SDK — the older `google-generativeai` package (and its
+# text-embedding-004 model) are both deprecated.
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise RuntimeError(
@@ -36,11 +30,25 @@ if not GEMINI_API_KEY:
         "(GEMINI_API_KEY=...) for local dev, or in your Render env vars."
     )
 genai_client = genai.Client(api_key=GEMINI_API_KEY)
+GENERATION_MODEL = "gemini-2.5-flash"
 
-local_llm = LLM(
-    model="gemini/gemini-2.5-flash",
-    api_key=GEMINI_API_KEY,
-)
+
+def run_gemini_agent(system_instruction: str, user_prompt: str) -> str:
+    """Call Gemini once with a system role + a task prompt, and return the text.
+
+    This replaces CrewAI's Agent/Task/Crew orchestration. CrewAI pulled in
+    chromadb as a transitive dependency purely for memory features this app
+    never used — and chromadb in turn pulls in torch, onnxruntime, and
+    transformers, which blew Vercel's 500MB serverless function size limit.
+    Three direct, sequential Gemini calls produce identical output at a
+    fraction of the deployed size.
+    """
+    response = genai_client.models.generate_content(
+        model=GENERATION_MODEL,
+        contents=user_prompt,
+        config=genai_types.GenerateContentConfig(system_instruction=system_instruction),
+    )
+    return (response.text or "").strip()
 
 # 3. DATABASE SETUP (POSTGRESQL)
 # DATABASE_URL comes from the environment in deployment (e.g. a Neon
@@ -257,107 +265,86 @@ def process_note(request: NoteRequest):
         if "db" in locals():
             db.close()
 
-    # B. HARDENED AGENTS
-    extractor_agent = Agent(
-        role='Action Item Extractor',
-        goal='Extract all tasks, deadlines, and assignees ONLY from the CURRENT raw notes. Never invent tasks. Never include tasks from historical context.',
-        backstory="""You are a strict, data-extraction algorithm. You read input text and extract action items into a clean markdown list. 
-        You DO NOT output conversational filler. You DO NOT say "Here are the items". You output ONLY the list.""",
-        verbose=CREW_VERBOSE,
-        allow_delegation=False,
-        llm=local_llm
+    # B. HARDENED PROMPTS — three sequential Gemini calls, each with the same
+    # role/goal/rules the original CrewAI agents used.
+    extractor_system = (
+        "You are a strict, data-extraction algorithm. You read input text and extract "
+        "action items into a clean markdown list. You DO NOT output conversational filler. "
+        'You DO NOT say "Here are the items". You output ONLY the list.\n\n'
+        "Goal: Extract all tasks, deadlines, and assignees ONLY from the CURRENT raw notes. "
+        "Never invent tasks. Never include tasks from historical context."
     )
+    extractor_prompt = f"""Extract a clean list of action items from ONLY this current note:
+    {raw_text}
 
-    context_agent = Agent(
-        role='Knowledge Archivist',
-        goal='Analyze historical notes and write a strictly factual summary of how they relate to the current note. Never generate new action items.',
-        backstory="""You are a research archivist. You read past notes and synthesize connections to current notes. 
-        You output pure, factual summaries. You NEVER use conversational filler like "Here is the summary".
-        You NEVER produce a bulleted task list of your own — that is not your job.""",
-        verbose=CREW_VERBOSE,
-        allow_delegation=False,
-        llm=local_llm
+    CRITICAL RULES:
+    - Do NOT extract action items from any past historical context, even if you happen to know about it.
+    - Do NOT invent people, tasks, or deadlines that are not explicitly stated in the note above.
+    - If the note contains no clear action items, output "No action items identified." and nothing else.
+    Output ONLY a bulleted markdown list (or the single line above if there is nothing to extract)."""
+    extractor_output = run_gemini_agent(extractor_system, extractor_prompt)
+
+    # C. ARCHIVIST — factual summary of how the current note relates to history.
+    context_system = (
+        "You are a research archivist. You read past notes and synthesize connections to "
+        "current notes. You output pure, factual summaries. You NEVER use conversational "
+        'filler like "Here is the summary". You NEVER produce a bulleted task list of your '
+        "own — that is not your job.\n\n"
+        "Goal: Analyze historical notes and write a strictly factual summary of how they "
+        "relate to the current note. Never generate new action items."
     )
+    context_prompt = f"""Analyze the current note:
+    {raw_text}
 
-    drafter_agent = Agent(
-        role='Executive Communications Director',
-        goal='Take the provided data and format it EXACTLY according to the strict Markdown template, without merging, reassigning, or inventing content between sections.',
-        backstory="""You are an automated document formatter. You take input text and place it into a rigid Markdown template.
-        You copy the Extractor's output into Action Items and the Archivist's output into Historical Context, verbatim in substance.
-        You NEVER move content between those two sections, and you NEVER invent new details for the summary paragraph
-        that are not present in the current raw note or in the Extractor/Archivist outputs you were given.
-        You absolutely NEVER add pleasantries, greetings, sign-offs, or conversational text. You DO NOT say "Here is the document." 
-        You output NOTHING but the final Markdown document.""",
-        verbose=CREW_VERBOSE,
-        allow_delegation=False,
-        llm=local_llm
+    Compare it with the following past notes retrieved from our archive:
+    {retrieved_context}
+
+    CRITICAL RULES:
+    - Only describe a connection if it is clearly and specifically relevant to the current note.
+    - If nothing retrieved is genuinely relevant, output "No relevant historical context found." and nothing else.
+    - Do NOT produce action items here. This section is historical reference only, not tasks.
+    Summarize the historical connections in plain prose or a short bulleted list."""
+    context_output = run_gemini_agent(context_system, context_prompt)
+
+    # D. DRAFTER — combines both outputs into the final markdown template.
+    drafter_system = (
+        "You are an automated document formatter. You take input text and place it into a "
+        "rigid Markdown template. You copy the Extractor's output into Action Items and the "
+        "Archivist's output into Historical Context, verbatim in substance. You NEVER move "
+        "content between those two sections, and you NEVER invent new details for the summary "
+        "paragraph that are not present in the current raw note or in the Extractor/Archivist "
+        "outputs you were given. You absolutely NEVER add pleasantries, greetings, sign-offs, "
+        'or conversational text. You DO NOT say "Here is the document." You output NOTHING '
+        "but the final Markdown document.\n\n"
+        "Goal: Take the provided data and format it EXACTLY according to the strict Markdown "
+        "template, without merging, reassigning, or inventing content between sections."
     )
+    drafter_prompt = f"""Combine the data into a single Markdown document.
+    You MUST output ONLY the markdown. DO NOT output any other text before or after the markdown.
+    Use EXACTLY this structure:
 
-    # C. HARDENED TASKS
-    extract_task = Task(
-        description=f"""Extract a clean list of action items from ONLY this current note:
-        {raw_text}
+    # Meeting Summary
+    [Write a 1-paragraph overview based STRICTLY on this current note: "{raw_text}" — and on the Extractor/Archivist outputs you were given. Do not introduce any topic, technology, or detail that is not present in the current note or in those two outputs.]
 
-        CRITICAL RULES:
-        - Do NOT extract action items from any past historical context, even if you happen to know about it.
-        - Do NOT invent people, tasks, or deadlines that are not explicitly stated in the note above.
-        - If the note contains no clear action items, output "No action items identified." and nothing else.
-        Output ONLY a bulleted markdown list (or the single line above if there is nothing to extract).""",
-        expected_output="A bulleted markdown list of action items drawn strictly from the current note. Zero conversational text.",
-        agent=extractor_agent
-    )
+    ## Action Items
+    [Insert the exact output from the Extractor Agent here — nothing from the Archivist's output belongs in this section]
 
-    context_task = Task(
-        description=f"""Analyze the current note:
-        {raw_text}
+    ## Historical Context Retrieved
+    [Insert the exact output from the Context Agent here — nothing from the Extractor's output belongs in this section]
 
-        Compare it with the following past notes retrieved from our archive:
-        {retrieved_context}
+    STRICT RULES:
+    - Do not merge, blend, or move content between the Action Items and Historical Context sections.
+    - Do not add any new action items of your own.
+    - The summary paragraph must not mention anything (technologies, people, causes) that is absent from the current raw note.
+    - Do not add a preamble ("Here is...") or a sign-off ("Let me know if...") of any kind.
+    - If a section has nothing to show, write "None." under that heading rather than omitting or inventing content.
 
-        CRITICAL RULES:
-        - Only describe a connection if it is clearly and specifically relevant to the current note.
-        - If nothing retrieved is genuinely relevant, output "No relevant historical context found." and nothing else.
-        - Do NOT produce action items here. This section is historical reference only, not tasks.
-        Summarize the historical connections in plain prose or a short bulleted list.""",
-        expected_output="A brief markdown summary of genuinely relevant historical references, or a single line stating none were found. Zero conversational text. No action items.",
-        agent=context_agent
-    )
+    Extractor's output (Action Items source):
+    {extractor_output}
 
-    draft_task = Task(
-        description=f"""Combine the data into a single Markdown document.
-        You MUST output ONLY the markdown. DO NOT output any other text before or after the markdown.
-        Use EXACTLY this structure:
-
-        # Meeting Summary
-        [Write a 1-paragraph overview based STRICTLY on this current note: "{raw_text}" — and on the Extractor/Archivist outputs you were given. Do not introduce any topic, technology, or detail that is not present in the current note or in those two outputs.]
-
-        ## Action Items
-        [Insert the exact output from the Extractor Agent here — nothing from the Archivist's output belongs in this section]
-
-        ## Historical Context Retrieved
-        [Insert the exact output from the Context Agent here — nothing from the Extractor's output belongs in this section]
-
-        STRICT RULES:
-        - Do not merge, blend, or move content between the Action Items and Historical Context sections.
-        - Do not add any new action items of your own.
-        - The summary paragraph must not mention anything (technologies, people, causes) that is absent from the current raw note.
-        - Do not add a preamble ("Here is...") or a sign-off ("Let me know if...") of any kind.
-        - If a section has nothing to show, write "None." under that heading rather than omitting or inventing content.
-        """,
-        expected_output="A strict Markdown document matching the exact structure requested, with cleanly separated sections and a summary grounded only in the current note. ZERO conversational text.",
-        agent=drafter_agent,
-        context=[extract_task, context_task]
-    )
-
-    # D. RUN CREW
-    crew = Crew(
-        agents=[extractor_agent, context_agent, drafter_agent],
-        tasks=[extract_task, context_task, draft_task],
-        process=Process.sequential,
-        verbose=CREW_VERBOSE
-    )
-    
-    processed_result = str(crew.kickoff())
+    Archivist's output (Historical Context source):
+    {context_output}"""
+    processed_result = run_gemini_agent(drafter_system, drafter_prompt)
 
     # D2. STRUCTURED EXTRACTION — turn the markdown into checkable action items
     # and derive topic tags for filtering/dashboard.
