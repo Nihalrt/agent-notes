@@ -20,6 +20,14 @@ export function extractSummary(markdown) {
   return summary.slice(0, 140);
 }
 
+export function extractTitle(raw = "") {
+  const clean = raw.replace(/\s+/g, " ").trim();
+  if (!clean) return "Untitled note";
+  const firstSentence = clean.split(/(?<=[.!?])\s/)[0];
+  if (firstSentence.length <= 64) return firstSentence.replace(/[.!?]$/, "");
+  return `${firstSentence.slice(0, 61).trim()}…`;
+}
+
 // Removes a `## <heading>` section (up to the next heading) from the markdown.
 // Used to drop the "Action Items" block from the detail view, since we render
 // that section as an interactive checklist instead of static text.
@@ -55,8 +63,7 @@ function renderInline(text, keyPrefix) {
   );
 }
 
-// A small, purpose-built markdown renderer for the fixed structure our
-// agents always output (# / ## headers, bullets, bold, plain paragraphs).
+// A small markdown renderer for the structured note format returned by the API.
 export function MarkdownView({ text }) {
   if (!text) return null;
   const lines = text.split("\n");

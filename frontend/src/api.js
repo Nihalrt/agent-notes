@@ -1,10 +1,22 @@
 import axios from "axios";
+import Constants from "expo-constants";
+import { Platform } from "react-native";
 
 // EXPO_PUBLIC_API_BASE is set at build time in the GitHub Pages workflow to
-// point at the deployed Render backend. Locally (Expo Go, simulator, or
-// `expo start --web`), it falls back to your Mac's LAN IP — swap this if
-// your Mac's IP changes (check with `ipconfig getifaddr en0`).
-export const API_BASE = process.env.EXPO_PUBLIC_API_BASE || "http://192.168.1.65:8001";
+// point at the deployed backend. During local development, Expo supplies the
+// computer address used by the current device, so no fixed Wi-Fi IP is needed.
+const expoHost = (
+  Constants.expoConfig?.hostUri ||
+  Constants.manifest2?.extra?.expoClient?.hostUri ||
+  ""
+).split(":")[0];
+
+const localApiBase =
+  Platform.OS === "web"
+    ? "http://localhost:8001"
+    : `http://${expoHost || "localhost"}:8001`;
+
+export const API_BASE = process.env.EXPO_PUBLIC_API_BASE || localApiBase;
 
 function mapNote(row) {
   return {

@@ -1,129 +1,115 @@
 import React from "react";
 import { View, Text, TouchableOpacity, ScrollView } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import { tagColor } from "../constants";
 
-function NavItem({ label, icon, active, onPress, badge }) {
+const NAV_ITEMS = [
+  { key: "overview", label: "Home", icon: "home-outline", activeIcon: "home" },
+  { key: "notes", label: "Notes", icon: "document-text-outline", activeIcon: "document-text" },
+  { key: "tasks", label: "Tasks", icon: "checkmark-circle-outline", activeIcon: "checkmark-circle" },
+];
+
+function NavItem({ item, active, onPress, badge }) {
   return (
     <TouchableOpacity
       onPress={onPress}
-      activeOpacity={0.7}
-      className={`flex-row items-center px-3 py-2.5 rounded-xl mb-1 ${
-        active ? "bg-flare/15 border border-flare/30" : ""
+      activeOpacity={0.72}
+      accessibilityRole="button"
+      accessibilityState={{ selected: active }}
+      className={`flex-row items-center px-3 py-3 rounded-xl mb-1 ${
+        active ? "bg-white/10" : ""
       }`}
     >
-      <Text className={`text-base mr-2.5 ${active ? "text-flare" : "text-shellFaint"}`}>
-        {icon}
-      </Text>
-      <Text
-        className={`font-bodyMed text-sm flex-1 ${
-          active ? "text-paper" : "text-shellFaint"
-        }`}
-      >
-        {label}
+      <Ionicons
+        name={active ? item.activeIcon : item.icon}
+        size={19}
+        color={active ? "#FFFFFF" : "#98A2B3"}
+      />
+      <Text className={`font-bodyMed text-sm ml-3 flex-1 ${active ? "text-white" : "text-shellFaint"}`}>
+        {item.label}
       </Text>
       {badge != null && (
-        <Text className="font-mono text-[10px] text-shellFaint">{badge}</Text>
+        <View className="bg-white/10 rounded-full min-w-6 h-6 px-1.5 items-center justify-center">
+          <Text className="font-bodyMed text-[11px] text-shellFaint">{badge}</Text>
+        </View>
       )}
     </TouchableOpacity>
   );
 }
-
 export function Sidebar({
   view,
   onSelectView,
   noteCount,
+  openTaskCount,
   connected,
   tags,
   activeTag,
   onSelectTag,
 }) {
   return (
-    <View className="w-64 bg-shell h-full px-4 py-7 justify-between">
-      <View className="flex-1">
-        <View className="flex-row items-center mb-8 px-1">
-          <View className="w-8 h-8 rounded-xl bg-flare items-center justify-center mr-2.5">
-            <Text className="font-display text-sm text-white">R</Text>
-          </View>
-          <View>
-            <Text className="font-display text-lg text-paper tracking-tight">
-              RELAY
-            </Text>
-            <Text className="font-mono text-[9px] text-shellFaint uppercase tracking-[0.18em]">
-              agent notes
-            </Text>
-          </View>
+    <View className="w-64 bg-shell h-full px-4 py-6">
+      <View className="flex-row items-center px-2 mb-8">
+        <View className="w-10 h-10 rounded-xl bg-flare items-center justify-center mr-3">
+          <Text className="font-display text-base text-white">R</Text>
         </View>
-
-        <NavItem
-          label="Overview"
-          icon="◈"
-          active={view === "overview"}
-          onPress={() => onSelectView("overview")}
-        />
-        <NavItem
-          label="All Notes"
-          icon="▤"
-          active={view === "notes" && !activeTag}
-          onPress={() => onSelectView("notes")}
-          badge={noteCount}
-        />
-
-        {tags && tags.length > 0 && (
-          <>
-            <Text className="font-mono text-[9px] text-shellFaint uppercase tracking-[0.18em] mt-6 mb-2 px-1">
-              topics
-            </Text>
-            <ScrollView className="max-h-64" showsVerticalScrollIndicator={false}>
-              {tags.map((tag) => {
-                const color = tagColor(tag);
-                const active = activeTag === tag;
-                return (
-                  <TouchableOpacity
-                    key={tag}
-                    onPress={() => onSelectTag(active ? null : tag)}
-                    activeOpacity={0.7}
-                    className={`flex-row items-center px-3 py-2 rounded-xl mb-0.5 ${
-                      active ? "bg-flare/15" : ""
-                    }`}
-                  >
-                    <View className={`w-2 h-2 rounded-full mr-2.5 ${color.bg}`} />
-                    <Text
-                      className={`font-body text-xs flex-1 ${
-                        active ? "text-paper" : "text-shellFaint"
-                      }`}
-                    >
-                      {tag}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-          </>
-        )}
+        <View>
+          <Text className="font-display text-xl text-white tracking-tight">Relay</Text>
+          <Text className="font-body text-[11px] text-shellFaint">Knowledge workspace</Text>
+        </View>
       </View>
 
-      <View>
-        <Text className="font-mono text-[9px] text-shellFaint uppercase tracking-[0.18em] mb-3 px-1">
-          your crew
-        </Text>
-        <View className="flex-row items-center px-1 mb-1">
-          <View className="w-1.5 h-1.5 rounded-full mr-2 bg-peachDeep" />
-          <View className="w-1.5 h-1.5 rounded-full mr-2 bg-skyDeep" />
-          <View className="w-1.5 h-1.5 rounded-full mr-2.5 bg-lilacDeep" />
-          <Text className="font-body text-xs text-shellFaint">
-            Extractor · Archivist · Drafter
-          </Text>
-        </View>
+      <Text className="font-bodyMed text-[11px] text-shellFaint uppercase tracking-[0.12em] px-3 mb-2">
+        Workspace
+      </Text>
+      {NAV_ITEMS.map((item) => (
+        <NavItem
+          key={item.key}
+          item={item}
+          active={view === item.key && !activeTag}
+          onPress={() => onSelectView(item.key)}
+          badge={item.key === "notes" ? noteCount : item.key === "tasks" ? openTaskCount : null}
+        />
+      ))}
 
-        <View className="flex-row items-center mt-4 pt-4 border-t border-shellLine px-1">
-          <View
-            className={`w-2 h-2 rounded-full mr-2 ${
-              connected ? "bg-sageDeep" : "bg-peachDeep"
-            }`}
-          />
-          <Text className="font-mono text-[10px] text-shellFaint uppercase tracking-[0.1em]">
-            {connected ? "backend connected" : "backend offline"}
+      {tags?.length > 0 && (
+        <View className="flex-1 mt-7 min-h-0">
+          <Text className="font-bodyMed text-[11px] text-shellFaint uppercase tracking-[0.12em] px-3 mb-2">
+            Topics
           </Text>
+          <ScrollView showsVerticalScrollIndicator={false}>
+            {tags.map(({ tag, count }) => {
+              const color = tagColor(tag);
+              const active = activeTag === tag;
+              return (
+                <TouchableOpacity
+                  key={tag}
+                  onPress={() => onSelectTag(active ? null : tag)}
+                  activeOpacity={0.72}
+                  className={`flex-row items-center px-3 py-2.5 rounded-xl mb-0.5 ${active ? "bg-white/10" : ""}`}
+                >
+                  <View className={`w-2 h-2 rounded-full mr-3 ${color.bg}`} />
+                  <Text className={`font-body text-xs flex-1 ${active ? "text-white" : "text-shellFaint"}`}>
+                    {tag}
+                  </Text>
+                  <Text className="font-body text-[11px] text-shellFaint">{count}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        </View>
+      )}
+
+      <View className="border-t border-shellLine pt-4 mt-4 px-2">
+        <View className="flex-row items-center">
+          <View className={`w-2 h-2 rounded-full mr-2.5 ${connected ? "bg-success" : "bg-danger"}`} />
+          <View className="flex-1">
+            <Text className="font-bodyMed text-xs text-white">
+              {connected ? "Service online" : "Connection unavailable"}
+            </Text>
+            <Text className="font-body text-[10px] text-shellFaint mt-0.5">
+              {connected ? "Your workspace is synced" : "Changes may not be saved"}
+            </Text>
+          </View>
         </View>
       </View>
     </View>

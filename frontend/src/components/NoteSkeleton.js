@@ -1,21 +1,14 @@
 import React from "react";
 import { View } from "react-native";
 
-// Placeholder cards shown while notes load, so the grid doesn't pop in.
-export function NoteSkeleton({ widthPct }) {
+export function NoteSkeleton({ widthPct = "100%" }) {
   return (
-    <View
-      className="bg-white/60 border border-line rounded-3xl p-5 mb-4"
-      style={{ width: widthPct }}
-    >
-      <View className="h-2.5 w-24 rounded-full bg-line mb-4" />
-      <View className="h-2 w-full rounded-full bg-line mb-2" />
-      <View className="h-2 w-full rounded-full bg-line mb-2" />
-      <View className="h-2 w-2/3 rounded-full bg-line mb-4" />
-      <View className="flex-row">
-        <View className="h-4 w-12 rounded-full bg-line mr-2" />
-        <View className="h-4 w-12 rounded-full bg-line" />
-      </View>
+    <View className="bg-white rounded-2xl border border-line p-5 mb-4" style={{ width: widthPct }}>
+      <View className="w-9 h-9 rounded-xl bg-line mb-5" />
+      <View className="h-4 bg-line rounded-md w-3/4 mb-3" />
+      <View className="h-3 bg-line rounded-md w-full mb-2" />
+      <View className="h-3 bg-line rounded-md w-5/6 mb-8" />
+      <View className="h-3 bg-line rounded-md w-1/3" />
     </View>
   );
 }

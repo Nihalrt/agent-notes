@@ -1,5 +1,5 @@
 services:
-  # 1. Relational Database: Stores users, login sessions, and the final processed notes
+  # PostgreSQL stores notes, tasks, tags, and semantic-search embeddings.
   postgres:
     image: postgres:15-alpine
     container_name: notes-postgres
@@ -13,18 +13,5 @@ services:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
 
-  # 2. Vector Database: The "Long Term Memory" for your Knowledge Archivist Agent
-  chromadb:
-    image: chromadb/chroma:latest
-    container_name: notes-chroma
-    environment:
-      - IS_PERSISTENT=TRUE
-    ports:
-      - "8000:8000"
-    volumes:
-      - chroma_data:/chroma/chroma
-    restart: unless-stopped
-
 volumes:
   postgres_data:
-  chroma_data:

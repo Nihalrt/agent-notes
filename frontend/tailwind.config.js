@@ -5,28 +5,30 @@ module.exports = {
   theme: {
     extend: {
       colors: {
-        paper: "#FAF8F3",
-        ink: "#1C1B1F",
-        inkfaint: "#8A8790",
-        line: "#E7E2D8",
-        lilac: "#DAD3F2",
-        lilacDeep: "#5A4FA6",
-        sage: "#CFE8C9",
-        sageDeep: "#3F7A4A",
-        peach: "#F6D6A8",
-        peachDeep: "#9A6A1E",
-        sky: "#C4E1F0",
-        skyDeep: "#2C6C8C",
-        // Signature accent — used sparingly for primary actions, the brand
-        // mark, and active nav states, so it reads as intentional rather
-        // than "default blue button" of a starter template.
-        flare: "#FF6B4A",
-        flareDeep: "#B84422",
-        // Dark shell colors for the sidebar/nav chrome, kept separate from
-        // "ink" (body text on paper) so the two surfaces have real contrast.
-        shell: "#15141A",
-        shellLine: "#28262F",
-        shellFaint: "#8D8A96",
+        paper: "#FFFFFF",
+        canvas: "#F7F8FA",
+        ink: "#101828",
+        inkfaint: "#667085",
+        line: "#EAECF0",
+        lineStrong: "#D0D5DD",
+        lilac: "#F0EEFF",
+        lilacDeep: "#5447C8",
+        sage: "#ECFDF3",
+        sageDeep: "#15803D",
+        peach: "#FFF7E8",
+        peachDeep: "#B45309",
+        sky: "#EEF8FF",
+        skyDeep: "#0369A1",
+        flare: "#635BFF",
+        flareDeep: "#4F46E5",
+        flareSoft: "#F0EEFF",
+        success: "#16A34A",
+        successSoft: "#ECFDF3",
+        danger: "#B42318",
+        dangerSoft: "#FEF3F2",
+        shell: "#101828",
+        shellLine: "#344054",
+        shellFaint: "#98A2B3",
       },
       fontFamily: {
         display: ["SpaceGrotesk_700Bold"],

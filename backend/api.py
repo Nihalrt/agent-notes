@@ -1,17 +1,18 @@
 import os
 import re
 import uuid
+import math
 from datetime import datetime, timedelta
 from typing import List, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import (
     create_engine, Column, String, Text, DateTime, JSON, desc, select, text,
 )
 from sqlalchemy.orm import sessionmaker, declarative_base
-import chromadb
 from google import genai
 from google.genai import types as genai_types
 from crewai import Agent, Task, Crew, Process, LLM
@@ -20,6 +21,7 @@ load_dotenv()  # picks up backend/.env for local dev; Render sets real env vars 
 
 # 1. ENVIRONMENT SETUP & PRIVACY
 os.environ["CREWAI_DISABLE_TELEMETRY"] = "true"
+CREW_VERBOSE = os.environ.get("CREW_VERBOSE", "false").lower() == "true"
 
 # 2. LLM CONFIGURATION — Gemini's free tier (no credit card required, just a
 # Google account at aistudio.google.com/apikey). CrewAI's LLM wraps LiteLLM,
@@ -40,7 +42,7 @@ local_llm = LLM(
     api_key=GEMINI_API_KEY,
 )
 
-# 3. DATABASE SETUP (POSTGRESQL & CHROMADB)
+# 3. DATABASE SETUP (POSTGRESQL)
 # DATABASE_URL comes from the environment in deployment (e.g. a Neon
 # connection string set on Render); falls back to the local docker-compose
 # Postgres for development.
@@ -48,7 +50,10 @@ DATABASE_URL = os.environ.get(
     "DATABASE_URL",
     "postgresql://admin:password123@localhost:5433/agent_notes_db",
 )
-engine = create_engine(DATABASE_URL)
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=300)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -61,6 +66,7 @@ class DBNote(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     tags = Column(JSON)
     action_items = Column(JSON)
+    embedding = Column(JSON)
 
 Base.metadata.create_all(bind=engine)
 
@@ -69,18 +75,7 @@ Base.metadata.create_all(bind=engine)
 with engine.begin() as conn:
     conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS tags JSON"))
     conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS action_items JSON"))
-
-# Embedded/persistent Chroma instead of a separate HTTP server — keeps this
-# to a single deployable process (Render's free tier only runs one service).
-# NOTE: Render's free web services have an ephemeral filesystem, so this
-# persisted data (and therefore RAG "historical context") resets on every
-# redeploy/restart. Actual notes are unaffected since those live in Postgres.
-CHROMA_PATH = os.environ.get("CHROMA_PATH", "./chroma_data")
-chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
-collection = chroma_client.get_or_create_collection(
-    name="user_knowledge_vault",
-    metadata={"hnsw:space": "cosine"}
-)
+    conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS embedding JSON"))
 
 # How close a past note must be to count as "relevant" (cosine distance:
 # 0.0 = identical, ~1.0 = unrelated). Start at 0.3. Watch the [RAG] debug
@@ -91,9 +86,8 @@ RELEVANCE_THRESHOLD = 0.3
 
 
 # 4. GEMINI EMBEDDING HELPER (replaces the local Ollama nomic-embed-text call)
-# Pinned to 768 dims via output_dimensionality so it stays a drop-in swap for
-# the old Ollama embedding size the Chroma collection was already using.
-def get_local_embedding(text: str):
+# Pinned to 768 dimensions to keep database rows compact and comparisons fast.
+def get_embedding(text: str):
     try:
         result = genai_client.models.embed_content(
             model="gemini-embedding-001",
@@ -103,7 +97,19 @@ def get_local_embedding(text: str):
         return result.embeddings[0].values
     except Exception as e:
         print(f"Error generating embedding: {e}")
-        return [0.0] * 768
+        return None
+
+
+def cosine_distance(left, right):
+    """Return cosine distance for two equal-length vectors."""
+    if not left or not right or len(left) != len(right):
+        return None
+    dot = sum(a * b for a, b in zip(left, right))
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
+    if not left_norm or not right_norm:
+        return None
+    return 1 - (dot / (left_norm * right_norm))
 
 
 # 4b. STRUCTURED EXTRACTION HELPERS
@@ -184,12 +190,18 @@ def serialize_note(row: "DBNote"):
 
 
 # 5. INITIALIZE FASTAPI & CORS
-app = FastAPI(title="Autonomous Action Note-Taker API")
+app = FastAPI(title="Relay Notes API", version="1.0.0")
+
+allowed_origins = [
+    origin.strip()
+    for origin in os.environ.get("ALLOWED_ORIGINS", "*").split(",")
+    if origin.strip()
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=allowed_origins,
+    allow_credentials=allowed_origins != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -207,23 +219,31 @@ def process_note(request: NoteRequest):
     if not raw_text.strip():
         raise HTTPException(status_code=400, detail="Note content cannot be empty.")
 
-    # A. PROGRAMMATIC RAG LOOKUP — now with a relevance threshold instead of
-    # blindly trusting the top 3 nearest neighbors.
+    # A. PROGRAMMATIC RAG LOOKUP — embeddings live beside notes in Postgres,
+    # so historical context survives Render restarts and redeploys.
+    query_vector = get_embedding(raw_text)
     try:
-        query_vector = get_local_embedding(raw_text)
-        results = collection.query(
-            query_embeddings=[query_vector],
-            n_results=3,
-            include=["documents", "distances"]
+        db = SessionLocal()
+        candidates = (
+            db.query(DBNote)
+            .filter(DBNote.embedding.isnot(None))
+            .order_by(desc(DBNote.created_at))
+            .limit(500)
+            .all()
         )
-        documents = results.get("documents", [[]])[0]
-        distances = results.get("distances", [[]])[0]
-
-        print(f"[RAG] distances for this query: {distances}")
+        scored = []
+        if query_vector:
+            for row in candidates:
+                distance = cosine_distance(query_vector, row.embedding)
+                if distance is not None:
+                    scored.append((distance, row.raw_content))
+        scored.sort(key=lambda item: item[0])
+        print(f"[RAG] distances for this query: {[round(item[0], 4) for item in scored[:3]]}")
 
         relevant_documents = [
-            doc for doc, dist in zip(documents, distances)
-            if dist <= RELEVANCE_THRESHOLD
+            document
+            for distance, document in scored[:3]
+            if distance <= RELEVANCE_THRESHOLD
         ]
 
         if relevant_documents:
@@ -231,8 +251,11 @@ def process_note(request: NoteRequest):
         else:
             retrieved_context = "No closely related past notes were found in the database archive."
     except Exception as e:
-        print(f"ChromaDB lookup failed: {e}")
+        print(f"Historical context lookup failed: {e}")
         retrieved_context = "Database archive is currently unavailable."
+    finally:
+        if "db" in locals():
+            db.close()
 
     # B. HARDENED AGENTS
     extractor_agent = Agent(
@@ -240,7 +263,7 @@ def process_note(request: NoteRequest):
         goal='Extract all tasks, deadlines, and assignees ONLY from the CURRENT raw notes. Never invent tasks. Never include tasks from historical context.',
         backstory="""You are a strict, data-extraction algorithm. You read input text and extract action items into a clean markdown list. 
         You DO NOT output conversational filler. You DO NOT say "Here are the items". You output ONLY the list.""",
-        verbose=True,
+        verbose=CREW_VERBOSE,
         allow_delegation=False,
         llm=local_llm
     )
@@ -251,7 +274,7 @@ def process_note(request: NoteRequest):
         backstory="""You are a research archivist. You read past notes and synthesize connections to current notes. 
         You output pure, factual summaries. You NEVER use conversational filler like "Here is the summary".
         You NEVER produce a bulleted task list of your own — that is not your job.""",
-        verbose=True,
+        verbose=CREW_VERBOSE,
         allow_delegation=False,
         llm=local_llm
     )
@@ -265,7 +288,7 @@ def process_note(request: NoteRequest):
         that are not present in the current raw note or in the Extractor/Archivist outputs you were given.
         You absolutely NEVER add pleasantries, greetings, sign-offs, or conversational text. You DO NOT say "Here is the document." 
         You output NOTHING but the final Markdown document.""",
-        verbose=True,
+        verbose=CREW_VERBOSE,
         allow_delegation=False,
         llm=local_llm
     )
@@ -331,7 +354,7 @@ def process_note(request: NoteRequest):
         agents=[extractor_agent, context_agent, drafter_agent],
         tasks=[extract_task, context_task, draft_task],
         process=Process.sequential,
-        verbose=True
+        verbose=CREW_VERBOSE
     )
     
     processed_result = str(crew.kickoff())
@@ -351,25 +374,19 @@ def process_note(request: NoteRequest):
             processed_content=processed_result,
             tags=tags,
             action_items=action_items,
+            embedding=query_vector,
         )
         db.add(new_note)
         db.commit()
     except Exception as e:
+        db.rollback()
         print(f"Error saving to Postgres: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="The note could not be saved. Please try again.",
+        ) from e
     finally:
         db.close()
-
-    # F. SAVE TO CHROMADB
-    try:
-        embedding = get_local_embedding(raw_text)
-        collection.add(
-            embeddings=[embedding],
-            documents=[raw_text],
-            ids=[note_id],
-            metadatas=[{"created_at": str(datetime.utcnow())}]
-        )
-    except Exception as e:
-        print(f"Error adding to ChromaDB: {e}")
 
     return {
         "note_id": note_id,
@@ -382,14 +399,19 @@ def process_note(request: NoteRequest):
 # 8. HEALTH CHECK — lets the frontend show a live connection indicator.
 @app.get("/health")
 def health():
+    db = None
     try:
         db = SessionLocal()
         db.execute(select(1))
-        db.close()
-        db_ok = True
     except Exception:
-        db_ok = False
-    return {"status": "ok" if db_ok else "degraded", "database": db_ok}
+        return JSONResponse(
+            status_code=503,
+            content={"status": "degraded", "database": False},
+        )
+    finally:
+        if db is not None:
+            db.close()
+    return {"status": "ok", "database": True}
 
 
 # 9. LIST / READ / DELETE — the process endpoint above never gave the
@@ -458,11 +480,6 @@ def delete_note(note_id: str):
         db.commit()
     finally:
         db.close()
-
-    try:
-        collection.delete(ids=[note_id])
-    except Exception as e:
-        print(f"ChromaDB delete failed for {note_id}: {e}")
 
     return {"note_id": note_id, "deleted": True}
 
