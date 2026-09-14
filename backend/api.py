@@ -1,31 +1,59 @@
 import os
 import re
 import uuid
-import requests
+import math
 from datetime import datetime, timedelta
 from typing import List, Optional
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import (
     create_engine, Column, String, Text, DateTime, JSON, desc, select, text,
 )
 from sqlalchemy.orm import sessionmaker, declarative_base
-import chromadb
+from google import genai
+from google.genai import types as genai_types
 from crewai import Agent, Task, Crew, Process, LLM
+
+load_dotenv()  # picks up backend/.env for local dev; Render sets real env vars directly
 
 # 1. ENVIRONMENT SETUP & PRIVACY
 os.environ["CREWAI_DISABLE_TELEMETRY"] = "true"
+CREW_VERBOSE = os.environ.get("CREW_VERBOSE", "false").lower() == "true"
 
-# 2. LOCAL LLM CONFIGURATION
+# 2. LLM CONFIGURATION — Gemini's free tier (no credit card required, just a
+# Google account at aistudio.google.com/apikey). CrewAI's LLM wraps LiteLLM,
+# which talks to Gemini directly given a "gemini/<model>" name + api_key.
+# Uses the current `google-genai` SDK — the older `google-generativeai`
+# package (and its text-embedding-004 model) are both deprecated.
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise RuntimeError(
+        "GEMINI_API_KEY is not set. Get a free key at "
+        "https://aistudio.google.com/apikey and put it in backend/.env "
+        "(GEMINI_API_KEY=...) for local dev, or in your Render env vars."
+    )
+genai_client = genai.Client(api_key=GEMINI_API_KEY)
+
 local_llm = LLM(
-    model="ollama/mistral",
-    base_url="http://localhost:11434"
+    model="gemini/gemini-2.5-flash",
+    api_key=GEMINI_API_KEY,
 )
 
-# 3. DATABASE SETUP (POSTGRESQL & CHROMADB)
-DATABASE_URL = "postgresql://admin:password123@localhost:5433/agent_notes_db"
-engine = create_engine(DATABASE_URL)
+# 3. DATABASE SETUP (POSTGRESQL)
+# DATABASE_URL comes from the environment in deployment (e.g. a Neon
+# connection string set on Render); falls back to the local docker-compose
+# Postgres for development.
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL",
+    "postgresql://admin:password123@localhost:5433/agent_notes_db",
+)
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=300)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -38,6 +66,7 @@ class DBNote(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     tags = Column(JSON)
     action_items = Column(JSON)
+    embedding = Column(JSON)
 
 Base.metadata.create_all(bind=engine)
 
@@ -46,16 +75,7 @@ Base.metadata.create_all(bind=engine)
 with engine.begin() as conn:
     conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS tags JSON"))
     conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS action_items JSON"))
-
-# NOTE: metadata={"hnsw:space": "cosine"} only takes effect the FIRST time this
-# collection is created. If you already have an existing collection from earlier
-# testing, run scripts/reset_vector_db.py once to recreate it cleanly on cosine
-# distance before this matters.
-chroma_client = chromadb.HttpClient(host="localhost", port=8000)
-collection = chroma_client.get_or_create_collection(
-    name="user_knowledge_vault",
-    metadata={"hnsw:space": "cosine"}
-)
+    conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS embedding JSON"))
 
 # How close a past note must be to count as "relevant" (cosine distance:
 # 0.0 = identical, ~1.0 = unrelated). Start at 0.3. Watch the [RAG] debug
@@ -65,25 +85,37 @@ collection = chroma_client.get_or_create_collection(
 RELEVANCE_THRESHOLD = 0.3
 
 
-# 4. LOCAL OLLAMA EMBEDDING HELPER
-def get_local_embedding(text: str):
+# 4. GEMINI EMBEDDING HELPER (replaces the local Ollama nomic-embed-text call)
+# Pinned to 768 dimensions to keep database rows compact and comparisons fast.
+def get_embedding(text: str):
     try:
-        response = requests.post(
-            "http://localhost:11434/api/embeddings",
-            json={"model": "nomic-embed-text", "prompt": text}
+        result = genai_client.models.embed_content(
+            model="gemini-embedding-001",
+            contents=text,
+            config=genai_types.EmbedContentConfig(output_dimensionality=768),
         )
-        response.raise_for_status()
-        return response.json()["embedding"]
+        return result.embeddings[0].values
     except Exception as e:
         print(f"Error generating embedding: {e}")
-        return [0.0] * 768
+        return None
+
+
+def cosine_distance(left, right):
+    """Return cosine distance for two equal-length vectors."""
+    if not left or not right or len(left) != len(right):
+        return None
+    dot = sum(a * b for a, b in zip(left, right))
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
+    if not left_norm or not right_norm:
+        return None
+    return 1 - (dot / (left_norm * right_norm))
 
 
 # 4b. STRUCTURED EXTRACTION HELPERS
 # The crew emits a fixed Markdown shape; these turn the relevant parts into
 # structured data (checkable action items, topic tags) for the frontend.
 NONE_PLACEHOLDER = re.compile(r"^(none\.?|no action items?.*|n/a)$", re.I)
-LOCAL_MODEL = "mistral"  # keep in sync with the local_llm config above
 
 
 def parse_action_items(markdown: str):
@@ -113,8 +145,8 @@ def parse_action_items(markdown: str):
 
 
 def generate_tags(raw_text: str):
-    """Ask the local model for 1-4 short topic tags. Deliberately resilient:
-    any failure or garbage output falls back to an empty list rather than
+    """Ask Gemini for 1-4 short topic tags. Deliberately resilient: any
+    failure or garbage output falls back to an empty list rather than
     breaking note creation."""
     prompt = (
         "Read the note and output 1 to 4 short topic tags describing it.\n"
@@ -123,18 +155,11 @@ def generate_tags(raw_text: str):
         f"Note: {raw_text}\n\nTags:"
     )
     try:
-        response = requests.post(
-            "http://localhost:11434/api/generate",
-            json={
-                "model": LOCAL_MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "options": {"num_predict": 40, "temperature": 0.1},
-            },
-            timeout=60,
+        response = genai_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
         )
-        response.raise_for_status()
-        raw = response.json().get("response", "")
+        raw = response.text or ""
     except Exception as e:
         print(f"Tag generation failed: {e}")
         return []
@@ -165,12 +190,18 @@ def serialize_note(row: "DBNote"):
 
 
 # 5. INITIALIZE FASTAPI & CORS
-app = FastAPI(title="Autonomous Action Note-Taker API")
+app = FastAPI(title="Relay Notes API", version="1.0.0")
+
+allowed_origins = [
+    origin.strip()
+    for origin in os.environ.get("ALLOWED_ORIGINS", "*").split(",")
+    if origin.strip()
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=allowed_origins,
+    allow_credentials=allowed_origins != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -188,23 +219,31 @@ def process_note(request: NoteRequest):
     if not raw_text.strip():
         raise HTTPException(status_code=400, detail="Note content cannot be empty.")
 
-    # A. PROGRAMMATIC RAG LOOKUP — now with a relevance threshold instead of
-    # blindly trusting the top 3 nearest neighbors.
+    # A. PROGRAMMATIC RAG LOOKUP — embeddings live beside notes in Postgres,
+    # so historical context survives Render restarts and redeploys.
+    query_vector = get_embedding(raw_text)
     try:
-        query_vector = get_local_embedding(raw_text)
-        results = collection.query(
-            query_embeddings=[query_vector],
-            n_results=3,
-            include=["documents", "distances"]
+        db = SessionLocal()
+        candidates = (
+            db.query(DBNote)
+            .filter(DBNote.embedding.isnot(None))
+            .order_by(desc(DBNote.created_at))
+            .limit(500)
+            .all()
         )
-        documents = results.get("documents", [[]])[0]
-        distances = results.get("distances", [[]])[0]
-
-        print(f"[RAG] distances for this query: {distances}")
+        scored = []
+        if query_vector:
+            for row in candidates:
+                distance = cosine_distance(query_vector, row.embedding)
+                if distance is not None:
+                    scored.append((distance, row.raw_content))
+        scored.sort(key=lambda item: item[0])
+        print(f"[RAG] distances for this query: {[round(item[0], 4) for item in scored[:3]]}")
 
         relevant_documents = [
-            doc for doc, dist in zip(documents, distances)
-            if dist <= RELEVANCE_THRESHOLD
+            document
+            for distance, document in scored[:3]
+            if distance <= RELEVANCE_THRESHOLD
         ]
 
         if relevant_documents:
@@ -212,8 +251,11 @@ def process_note(request: NoteRequest):
         else:
             retrieved_context = "No closely related past notes were found in the database archive."
     except Exception as e:
-        print(f"ChromaDB lookup failed: {e}")
+        print(f"Historical context lookup failed: {e}")
         retrieved_context = "Database archive is currently unavailable."
+    finally:
+        if "db" in locals():
+            db.close()
 
     # B. HARDENED AGENTS
     extractor_agent = Agent(
@@ -221,7 +263,7 @@ def process_note(request: NoteRequest):
         goal='Extract all tasks, deadlines, and assignees ONLY from the CURRENT raw notes. Never invent tasks. Never include tasks from historical context.',
         backstory="""You are a strict, data-extraction algorithm. You read input text and extract action items into a clean markdown list. 
         You DO NOT output conversational filler. You DO NOT say "Here are the items". You output ONLY the list.""",
-        verbose=True,
+        verbose=CREW_VERBOSE,
         allow_delegation=False,
         llm=local_llm
     )
@@ -232,7 +274,7 @@ def process_note(request: NoteRequest):
         backstory="""You are a research archivist. You read past notes and synthesize connections to current notes. 
         You output pure, factual summaries. You NEVER use conversational filler like "Here is the summary".
         You NEVER produce a bulleted task list of your own — that is not your job.""",
-        verbose=True,
+        verbose=CREW_VERBOSE,
         allow_delegation=False,
         llm=local_llm
     )
@@ -246,7 +288,7 @@ def process_note(request: NoteRequest):
         that are not present in the current raw note or in the Extractor/Archivist outputs you were given.
         You absolutely NEVER add pleasantries, greetings, sign-offs, or conversational text. You DO NOT say "Here is the document." 
         You output NOTHING but the final Markdown document.""",
-        verbose=True,
+        verbose=CREW_VERBOSE,
         allow_delegation=False,
         llm=local_llm
     )
@@ -312,7 +354,7 @@ def process_note(request: NoteRequest):
         agents=[extractor_agent, context_agent, drafter_agent],
         tasks=[extract_task, context_task, draft_task],
         process=Process.sequential,
-        verbose=True
+        verbose=CREW_VERBOSE
     )
     
     processed_result = str(crew.kickoff())
@@ -332,25 +374,19 @@ def process_note(request: NoteRequest):
             processed_content=processed_result,
             tags=tags,
             action_items=action_items,
+            embedding=query_vector,
         )
         db.add(new_note)
         db.commit()
     except Exception as e:
+        db.rollback()
         print(f"Error saving to Postgres: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="The note could not be saved. Please try again.",
+        ) from e
     finally:
         db.close()
-
-    # F. SAVE TO CHROMADB
-    try:
-        embedding = get_local_embedding(raw_text)
-        collection.add(
-            embeddings=[embedding],
-            documents=[raw_text],
-            ids=[note_id],
-            metadatas=[{"created_at": str(datetime.utcnow())}]
-        )
-    except Exception as e:
-        print(f"Error adding to ChromaDB: {e}")
 
     return {
         "note_id": note_id,
@@ -363,14 +399,19 @@ def process_note(request: NoteRequest):
 # 8. HEALTH CHECK — lets the frontend show a live connection indicator.
 @app.get("/health")
 def health():
+    db = None
     try:
         db = SessionLocal()
         db.execute(select(1))
-        db.close()
-        db_ok = True
     except Exception:
-        db_ok = False
-    return {"status": "ok" if db_ok else "degraded", "database": db_ok}
+        return JSONResponse(
+            status_code=503,
+            content={"status": "degraded", "database": False},
+        )
+    finally:
+        if db is not None:
+            db.close()
+    return {"status": "ok", "database": True}
 
 
 # 9. LIST / READ / DELETE — the process endpoint above never gave the
@@ -440,11 +481,6 @@ def delete_note(note_id: str):
     finally:
         db.close()
 
-    try:
-        collection.delete(ids=[note_id])
-    except Exception as e:
-        print(f"ChromaDB delete failed for {note_id}: {e}")
-
     return {"note_id": note_id, "deleted": True}
 
 
@@ -493,4 +529,4 @@ def stats():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8001)))

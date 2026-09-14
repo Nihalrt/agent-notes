@@ -1,11 +1,22 @@
 import axios from "axios";
+import Constants from "expo-constants";
+import { Platform } from "react-native";
 
-// Your Mac's LAN IP, not "localhost" — a phone on Expo Go can't resolve
-// "localhost" to your Mac, only to itself. This changes whenever your Mac
-// gets a new DHCP lease (Wi-Fi reconnect, router reboot, etc.) — re-run
-// `ipconfig getifaddr en0` and update this if the app ever shows "backend
-// offline" after working before.
-export const API_BASE = "http://192.168.1.65:8001";
+// EXPO_PUBLIC_API_BASE is set at build time in the GitHub Pages workflow to
+// point at the deployed backend. During local development, Expo supplies the
+// computer address used by the current device, so no fixed Wi-Fi IP is needed.
+const expoHost = (
+  Constants.expoConfig?.hostUri ||
+  Constants.manifest2?.extra?.expoClient?.hostUri ||
+  ""
+).split(":")[0];
+
+const localApiBase =
+  Platform.OS === "web"
+    ? "http://localhost:8001"
+    : `http://${expoHost || "localhost"}:8001`;
+
+export const API_BASE = process.env.EXPO_PUBLIC_API_BASE || localApiBase;
 
 function mapNote(row) {
   return {

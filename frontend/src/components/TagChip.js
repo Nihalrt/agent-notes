@@ -2,25 +2,22 @@ import React from "react";
 import { Text, TouchableOpacity } from "react-native";
 import { tagColor } from "../constants";
 
-export function TagChip({ tag, onPress, active }) {
+export function TagChip({ tag, onPress, active = false }) {
   const color = tagColor(tag);
-  const chip = (
+  const content = (
     <Text
-      className={`font-mono text-[9px] uppercase tracking-[0.08em] px-2 py-1 rounded-full ${color.bg} ${color.ink} ${
-        active ? "opacity-100" : ""
+      className={`font-bodyMed text-[11px] px-2.5 py-1 rounded-lg ${
+        active ? "bg-flare text-white" : `${color.bg} ${color.ink}`
       }`}
     >
-      #{tag}
+      {tag}
     </Text>
   );
-  if (!onPress) return chip;
+
+  if (!onPress) return content;
   return (
-    <TouchableOpacity
-      onPress={onPress}
-      activeOpacity={0.7}
-      className={active ? "" : "opacity-90"}
-    >
-      {chip}
+    <TouchableOpacity onPress={onPress} activeOpacity={0.72}>
+      {content}
     </TouchableOpacity>
   );
 }

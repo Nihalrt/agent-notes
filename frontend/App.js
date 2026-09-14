@@ -1,23 +1,15 @@
 import "./global.css";
-import React, { useEffect, useMemo, useState, useCallback } from "react";
-import {
-  SafeAreaView,
-  ScrollView,
-  View,
-  Text,
-  StatusBar,
-  useWindowDimensions,
-} from "react-native";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { ScrollView, View, Text, TouchableOpacity, StatusBar, useWindowDimensions } from "react-native";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import { Ionicons } from "@expo/vector-icons";
 import { useFonts } from "expo-font";
-import {
-  SpaceGrotesk_700Bold,
-  SpaceGrotesk_500Medium,
-} from "@expo-google-fonts/space-grotesk";
+import { SpaceGrotesk_700Bold, SpaceGrotesk_500Medium } from "@expo-google-fonts/space-grotesk";
 import { Inter_400Regular, Inter_500Medium } from "@expo-google-fonts/inter";
 import { JetBrainsMono_500Medium } from "@expo-google-fonts/jetbrains-mono";
 
 import { fetchNotes, deleteNote, checkHealth, fetchStats } from "./src/api";
-import { CARD_COLORS, DESKTOP_BREAKPOINT } from "./src/constants";
+import { DESKTOP_BREAKPOINT, TABLET_BREAKPOINT } from "./src/constants";
 import { Sidebar } from "./src/components/Sidebar";
 import { Header } from "./src/components/Header";
 import { BottomNav } from "./src/components/BottomNav";
@@ -27,8 +19,15 @@ import { NoteDetailModal } from "./src/components/NoteDetailModal";
 import { ComposeSheet } from "./src/components/ComposeSheet";
 import { ConfirmDialog } from "./src/components/ConfirmDialog";
 import { Dashboard } from "./src/components/Dashboard";
+import { TasksView } from "./src/components/TasksView";
 
-export default function App() {
+const PAGE_COPY = {
+  overview: { title: "Home", subtitle: "A clear view of your notes and next steps" },
+  notes: { title: "Notes", subtitle: "Search, review, and organize your knowledge" },
+  tasks: { title: "Tasks", subtitle: "Track every action item in one place" },
+};
+
+function RelayApp() {
   const [fontsLoaded] = useFonts({
     SpaceGrotesk_700Bold,
     SpaceGrotesk_500Medium,
@@ -36,16 +35,16 @@ export default function App() {
     Inter_500Medium,
     JetBrainsMono_500Medium,
   });
-
   const { width, height } = useWindowDimensions();
   const isDesktop = width >= DESKTOP_BREAKPOINT;
+  const isTablet = width >= TABLET_BREAKPOINT;
 
   const [notes, setNotes] = useState([]);
   const [stats, setStats] = useState(null);
-  const [loadingNotes, setLoadingNotes] = useState(true);
+  const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
-  const [connected, setConnected] = useState(true);
-  const [view, setView] = useState("notes"); // "overview" | "notes"
+  const [connected, setConnected] = useState(false);
+  const [view, setView] = useState("overview");
   const [search, setSearch] = useState("");
   const [activeTag, setActiveTag] = useState(null);
   const [selected, setSelected] = useState(null);
@@ -53,86 +52,61 @@ export default function App() {
   const [pendingDeleteId, setPendingDeleteId] = useState(null);
   const [deleteError, setDeleteError] = useState(null);
 
-  const refreshStats = useCallback(() => {
-    fetchStats()
-      .then(setStats)
-      .catch(() => {});
+  const refreshStats = useCallback(() => fetchStats().then(setStats).catch(() => {}), []);
+
+  const loadWorkspace = useCallback(async () => {
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const [loadedNotes, loadedStats] = await Promise.all([fetchNotes(), fetchStats()]);
+      setNotes(loadedNotes);
+      setStats(loadedStats);
+      setConnected(true);
+    } catch {
+      setLoadError("Your workspace could not be loaded. Check your connection and try again.");
+      setConnected(false);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
     let cancelled = false;
-    fetchNotes()
-      .then((data) => {
-        if (!cancelled) setNotes(data);
-      })
-      .catch(() => {
-        if (!cancelled)
-          setLoadError("Couldn't load your note history from the backend.");
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingNotes(false);
-      });
-
-    refreshStats();
-
-    const pingHealth = () =>
-      checkHealth().then((ok) => !cancelled && setConnected(ok));
-    pingHealth();
-    const interval = setInterval(pingHealth, 20000);
+    loadWorkspace();
+    const ping = () => checkHealth().then((online) => !cancelled && setConnected(online));
+    const interval = setInterval(ping, 30000);
     return () => {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [refreshStats]);
+  }, [loadWorkspace]);
 
-  // Distinct tags across all notes, sorted, for the sidebar filter.
-  const allTags = useMemo(() => {
-    const set = new Set();
-    notes.forEach((n) => (n.tags || []).forEach((t) => set.add(t)));
-    return [...set].sort();
+  const topicCounts = useMemo(() => {
+    const counts = {};
+    notes.forEach((note) => (note.tags || []).forEach((tag) => { counts[tag] = (counts[tag] || 0) + 1; }));
+    return Object.entries(counts)
+      .map(([tag, count]) => ({ tag, count }))
+      .sort((left, right) => right.count - left.count || left.tag.localeCompare(right.tag));
   }, [notes]);
 
   const filteredNotes = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return notes.filter((n) => {
-      if (activeTag && !(n.tags || []).includes(activeTag)) return false;
-      if (!q) return true;
-      return (
-        n.raw.toLowerCase().includes(q) ||
-        n.processed.toLowerCase().includes(q) ||
-        (n.tags || []).some((t) => t.includes(q))
-      );
+    const query = search.trim().toLowerCase();
+    return notes.filter((note) => {
+      if (activeTag && !(note.tags || []).includes(activeTag)) return false;
+      if (!query) return true;
+      return note.raw.toLowerCase().includes(query)
+        || note.processed.toLowerCase().includes(query)
+        || (note.tags || []).some((tag) => tag.toLowerCase().includes(query))
+        || (note.actionItems || []).some((item) => item.text.toLowerCase().includes(query));
     });
   }, [notes, search, activeTag]);
 
-  const handleCreated = (note) => {
-    setNotes((prev) => [note, ...prev]);
-    refreshStats();
-  };
+  const openTaskCount = notes.reduce((total, note) => total + (note.actionItems || []).filter((item) => !item.done).length, 0);
 
-  const handleNoteUpdated = (updated) => {
-    setNotes((prev) => prev.map((n) => (n.id === updated.id ? updated : n)));
-    setSelected((cur) => (cur && cur.id === updated.id ? updated : cur));
-    refreshStats();
-  };
-
-  const confirmDelete = async () => {
-    const id = pendingDeleteId;
-    setPendingDeleteId(null);
-    const prev = notes;
-    setNotes((cur) => cur.filter((n) => n.id !== id));
-    try {
-      await deleteNote(id);
-      refreshStats();
-    } catch (e) {
-      setNotes(prev);
-      setDeleteError("The backend didn't accept the delete. Try again.");
-    }
-  };
-
-  const selectView = (v) => {
-    setView(v);
-    if (v === "notes") setActiveTag(null);
+  const selectView = (nextView) => {
+    setView(nextView);
+    setActiveTag(null);
+    if (nextView === "overview") setSearch("");
   };
 
   const selectTag = (tag) => {
@@ -140,155 +114,148 @@ export default function App() {
     setView("notes");
   };
 
-  const openNote = (note) => setSelected(note);
+  const handleCreated = (note) => {
+    setNotes((current) => [note, ...current]);
+    setView("notes");
+    refreshStats();
+  };
 
-  if (!fontsLoaded) return null;
+  const handleNoteUpdated = (updated) => {
+    setNotes((current) => current.map((note) => note.id === updated.id ? updated : note));
+    setSelected((current) => current?.id === updated.id ? updated : current);
+    refreshStats();
+  };
 
-  const cardWidth = isDesktop ? "31.5%" : "48%";
+  const confirmDelete = async () => {
+    const id = pendingDeleteId;
+    const previous = notes;
+    setPendingDeleteId(null);
+    setNotes((current) => current.filter((note) => note.id !== id));
+    setDeleteError(null);
+    try {
+      await deleteNote(id);
+      refreshStats();
+    } catch {
+      setNotes(previous);
+      setDeleteError("This note could not be deleted. Please try again.");
+    }
+  };
 
-  const notesView = (
-    <>
-      {(activeTag || search) && (
-        <View className="flex-row items-center mb-4">
-          <Text className="font-body text-sm text-inkfaint">
-            {filteredNotes.length} note{filteredNotes.length === 1 ? "" : "s"}
-            {activeTag ? ` tagged #${activeTag}` : ""}
-            {search ? ` matching "${search}"` : ""}
-          </Text>
-          {activeTag && (
-            <Text
-              onPress={() => setActiveTag(null)}
-              className="font-bodyMed text-sm text-flareDeep ml-3"
-            >
-              Clear
-            </Text>
-          )}
-        </View>
+  if (!fontsLoaded) return <View className="flex-1 bg-canvas" />;
+
+  const cardWidth = isDesktop ? "32%" : isTablet ? "48.5%" : "100%";
+  const page = PAGE_COPY[view];
+
+  const notesContent = loading ? (
+    <View className="flex-row flex-wrap justify-between">
+      {[0, 1, 2, 3, 4, 5].map((key) => <NoteSkeleton key={key} widthPct={cardWidth} />)}
+    </View>
+  ) : filteredNotes.length ? (
+    <View className="flex-row flex-wrap justify-between">
+      {filteredNotes.map((note) => (
+        <NoteCard key={note.id} note={note} onPress={() => setSelected(note)} onRequestDelete={setPendingDeleteId} widthPct={cardWidth} />
+      ))}
+    </View>
+  ) : (
+    <View className="bg-white border border-line rounded-2xl items-center px-6 py-14">
+      <View className="w-12 h-12 rounded-2xl bg-flareSoft items-center justify-center">
+        <Ionicons name={notes.length ? "search-outline" : "document-text-outline"} size={24} color="#635BFF" />
+      </View>
+      <Text className="font-displayMed text-base text-ink mt-4">{notes.length ? "No matching notes" : "Create your first note"}</Text>
+      <Text className="font-body text-sm text-inkfaint text-center mt-1 max-w-md">
+        {notes.length ? "Try a different search term or clear the selected topic." : "Add an update, meeting note, or decision. Relay will organize it into a summary, topics, and action items."}
+      </Text>
+      {!notes.length && (
+        <TouchableOpacity onPress={() => setComposing(true)} className="bg-flare h-10 px-4 rounded-xl flex-row items-center justify-center mt-5">
+          <Ionicons name="add" size={19} color="#FFFFFF" />
+          <Text className="font-bodyMed text-sm text-white ml-1.5">Create note</Text>
+        </TouchableOpacity>
       )}
-
-      {loadingNotes ? (
-        <View className="flex-row flex-wrap justify-between w-full min-w-0">
-          {[0, 1, 2, 3, 4, 5].map((i) => (
-            <NoteSkeleton key={i} widthPct={cardWidth} />
-          ))}
-        </View>
-      ) : filteredNotes.length === 0 ? (
-        <View className="border border-dashed border-line rounded-3xl p-10 items-center">
-          <Text className="font-display text-base text-ink mb-1">
-            {notes.length === 0 ? "No notes yet" : "Nothing here"}
-          </Text>
-          <Text className="font-body text-sm text-inkfaint text-center">
-            {notes.length === 0
-              ? "Tap “New Note” and your crew will extract tasks, tag it, and draft it up here."
-              : "No notes match this filter. Try clearing the search or tag."}
-          </Text>
-        </View>
-      ) : (
-        <View className="flex-row flex-wrap justify-between w-full min-w-0">
-          {filteredNotes.map((note, i) => (
-            <NoteCard
-              key={note.id}
-              note={note}
-              color={CARD_COLORS[i % CARD_COLORS.length]}
-              onPress={() => openNote(note)}
-              onRequestDelete={setPendingDeleteId}
-              widthPct={cardWidth}
-            />
-          ))}
-        </View>
-      )}
-    </>
-  );
-
-  const content = (
-    <ScrollView
-      className="flex-1 min-w-0 bg-paper"
-      contentContainerStyle={{ padding: 20, paddingBottom: 32 }}
-      keyboardShouldPersistTaps="handled"
-    >
-      {loadError && (
-        <Text className="font-body text-xs text-peachDeep mb-4">{loadError}</Text>
-      )}
-      {deleteError && (
-        <Text className="font-body text-xs text-peachDeep mb-4">{deleteError}</Text>
-      )}
-
-      {view === "overview" ? (
-        <Dashboard
-          stats={stats}
-          loading={loadingNotes}
-          recentNotes={notes}
-          onOpenNote={(n) => {
-            setView("notes");
-            openNote(n);
-          }}
-        />
-      ) : (
-        notesView
-      )}
-    </ScrollView>
+    </View>
   );
 
   return (
-    <SafeAreaView className="bg-paper" style={{ width, height }}>
+    <SafeAreaView className="bg-canvas" style={{ width, height }} edges={["top", "bottom"]}>
       <StatusBar barStyle="dark-content" />
-
-      {isDesktop ? (
-        <View className="flex-1 flex-row min-w-0">
+      <View className="flex-1 flex-row min-w-0">
+        {isDesktop && (
           <Sidebar
             view={view}
             onSelectView={selectView}
             noteCount={notes.length}
+            openTaskCount={openTaskCount}
             connected={connected}
-            tags={allTags}
+            tags={topicCounts}
             activeTag={activeTag}
             onSelectTag={selectTag}
           />
-          <View className="flex-1 min-w-0">
-            <Header
-              search={search}
-              onSearchChange={setSearch}
-              onNewNote={() => setComposing(true)}
-              showNewButton
-            />
-            {content}
-          </View>
-        </View>
-      ) : (
-        <View className="flex-1">
+        )}
+
+        <View className="flex-1 min-w-0">
           <Header
+            title={page.title}
+            subtitle={activeTag ? `Showing notes tagged “${activeTag}”` : page.subtitle}
             search={search}
             onSearchChange={setSearch}
-            connected={connected}
-            showNewButton={false}
-          />
-          {content}
-          <BottomNav
-            view={view}
-            onSelectView={selectView}
-            noteCount={notes.length}
             onNewNote={() => setComposing(true)}
+            showSearch={view !== "overview"}
+            compact={!isDesktop}
+            connected={connected}
           />
-        </View>
-      )}
 
-      <ComposeSheet
-        visible={composing}
-        onClose={() => setComposing(false)}
-        onCreated={handleCreated}
-      />
-      <NoteDetailModal
-        note={selected}
-        onClose={() => setSelected(null)}
-        onNoteUpdated={handleNoteUpdated}
-      />
+          <ScrollView className="flex-1 bg-canvas" contentContainerStyle={{ padding: isDesktop ? 28 : 18, paddingBottom: 40 }} keyboardShouldPersistTaps="handled">
+            {(loadError || deleteError) && (
+              <View className="bg-dangerSoft rounded-xl px-4 py-3 mb-4 flex-row items-center">
+                <Ionicons name="alert-circle-outline" size={19} color="#B42318" />
+                <Text className="font-body text-xs text-danger flex-1 ml-2">{loadError || deleteError}</Text>
+                {!!loadError && <TouchableOpacity onPress={loadWorkspace}><Text className="font-bodyMed text-xs text-danger">Retry</Text></TouchableOpacity>}
+              </View>
+            )}
+
+            {view === "overview" && (
+              <Dashboard
+                stats={stats}
+                loading={loading}
+                recentNotes={notes}
+                onOpenNote={setSelected}
+                onNewNote={() => setComposing(true)}
+                onViewTasks={() => selectView("tasks")}
+                compact={!isDesktop}
+              />
+            )}
+
+            {view === "notes" && (
+              <View>
+                {(activeTag || search) && (
+                  <View className="flex-row items-center justify-between mb-4">
+                    <Text className="font-body text-sm text-inkfaint">{filteredNotes.length} result{filteredNotes.length === 1 ? "" : "s"}</Text>
+                    {activeTag && <TouchableOpacity onPress={() => setActiveTag(null)}><Text className="font-bodyMed text-sm text-flareDeep">Clear topic</Text></TouchableOpacity>}
+                  </View>
+                )}
+                {notesContent}
+              </View>
+            )}
+
+            {view === "tasks" && <TasksView notes={filteredNotes} onNoteUpdated={handleNoteUpdated} onOpenNote={setSelected} />}
+          </ScrollView>
+
+          {!isDesktop && <BottomNav view={view} onSelectView={selectView} onNewNote={() => setComposing(true)} />}
+        </View>
+      </View>
+
+      <ComposeSheet visible={composing} onClose={() => setComposing(false)} onCreated={handleCreated} />
+      <NoteDetailModal note={selected} onClose={() => setSelected(null)} onNoteUpdated={handleNoteUpdated} />
       <ConfirmDialog
         visible={!!pendingDeleteId}
         title="Delete this note?"
-        message="This can't be undone."
+        message="The note and its action items will be permanently removed."
         onCancel={() => setPendingDeleteId(null)}
         onConfirm={confirmDelete}
       />
     </SafeAreaView>
   );
+}
+
+export default function App() {
+  return <SafeAreaProvider><RelayApp /></SafeAreaProvider>;
 }
