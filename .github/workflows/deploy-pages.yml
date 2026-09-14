@@ -37,7 +37,7 @@ jobs:
         working-directory: frontend
         env:
           GITHUB_PAGES_BUILD: "true"
-          EXPO_PUBLIC_API_BASE: "https://agent-notes-api.onrender.com"
+          EXPO_PUBLIC_API_BASE: "https://agent-notes-six.vercel.app"
         run: npx expo export -p web
 
       - uses: actions/configure-pages@v5
