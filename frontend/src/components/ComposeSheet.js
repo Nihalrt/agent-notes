@@ -13,7 +13,13 @@ import {
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { createDrawingNote, processNote } from "../api";
-import { DRAWING_HEIGHT, DRAWING_WIDTH, HandwritingCanvas } from "./HandwritingCanvas";
+import {
+  DRAWING_HEIGHT,
+  DRAWING_WIDTH,
+  HandwritingCanvas,
+  MAX_DRAWING_POINTS,
+  MAX_DRAWING_STROKES,
+} from "./HandwritingCanvas";
 
 const PROCESSING_STAGES = [
   "Creating a clear summary",
@@ -38,6 +44,8 @@ export function ComposeSheet({ visible, initialMode = "type", onClose, onCreated
   const [stage, setStage] = useState(0);
   const [error, setError] = useState(null);
   const timer = useRef(null);
+  const drawingPointCount = strokes.reduce((total, stroke) => total + (stroke.points?.length || 0), 0);
+  const drawingTooLarge = strokes.length > MAX_DRAWING_STROKES || drawingPointCount > MAX_DRAWING_POINTS;
 
   useEffect(() => () => timer.current && clearInterval(timer.current), []);
   useEffect(() => {
@@ -55,6 +63,10 @@ export function ComposeSheet({ visible, initialMode = "type", onClose, onCreated
 
   const handleSend = async () => {
     if (loading || (mode === "type" ? !draft.trim() : !strokes.length)) return;
+    if (mode === "draw" && drawingTooLarge) {
+      setError("This drawing is too large to save. Erase or undo some ink, then try again.");
+      return;
+    }
     setLoading(true);
     setError(null);
     setStage(0);
@@ -236,12 +248,12 @@ export function ComposeSheet({ visible, initialMode = "type", onClose, onCreated
                 </TouchableOpacity>
                 <TouchableOpacity
                   onPress={handleSend}
-                  disabled={(mode === "type" ? !draft.trim() : !strokes.length) || loading}
+                  disabled={(mode === "type" ? !draft.trim() : !strokes.length || drawingTooLarge) || loading}
                   activeOpacity={0.82}
-                  className={`h-11 px-5 rounded-xl items-center justify-center flex-row ${(mode === "type" ? !draft.trim() : !strokes.length) || loading ? "bg-line" : "bg-flare"}`}
+                  className={`h-11 px-5 rounded-xl items-center justify-center flex-row ${(mode === "type" ? !draft.trim() : !strokes.length || drawingTooLarge) || loading ? "bg-line" : "bg-flare"}`}
                 >
                   {!loading && <Ionicons name={mode === "type" ? "sparkles-outline" : "save-outline"} size={18} color={(mode === "type" ? draft.trim() : strokes.length) ? "#FFFFFF" : "#98A2B3"} />}
-                  <Text className={`font-bodyMed text-sm ml-2 ${(mode === "type" ? draft.trim() : strokes.length) && !loading ? "text-white" : "text-inkfaint"}`}>
+                  <Text className={`font-bodyMed text-sm ml-2 ${(mode === "type" ? draft.trim() : strokes.length && !drawingTooLarge) && !loading ? "text-white" : "text-inkfaint"}`}>
                     {loading ? "Saving…" : mode === "type" ? "Create note" : "Save drawing"}
                   </Text>
                 </TouchableOpacity>

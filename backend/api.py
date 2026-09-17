@@ -230,6 +230,10 @@ class DrawingNoteRequest(BaseModel):
     drawing: dict
 
 
+MAX_DRAWING_STROKES = 500
+MAX_DRAWING_POINTS = 10000
+
+
 def sanitize_drawing(drawing: dict):
     """Validate and compact a client drawing before it reaches PostgreSQL."""
     width = drawing.get("width", 900)
@@ -238,8 +242,8 @@ def sanitize_drawing(drawing: dict):
     paper = drawing.get("paper", "lined")
     if (width, height) not in {(900, 1200), (1000, 700)} or not isinstance(strokes, list):
         raise HTTPException(status_code=400, detail="The drawing format is invalid.")
-    if len(strokes) > 500:
-        raise HTTPException(status_code=400, detail="This drawing has too many strokes.")
+    if len(strokes) > MAX_DRAWING_STROKES:
+        raise HTTPException(status_code=400, detail=f"A drawing can contain up to {MAX_DRAWING_STROKES} strokes.")
     if paper not in {"lined", "grid", "dotted", "blank"}:
         paper = "lined"
 
@@ -263,8 +267,8 @@ def sanitize_drawing(drawing: dict):
         if not points:
             continue
         point_count += len(points)
-        if point_count > 10000:
-            raise HTTPException(status_code=400, detail="This drawing is too detailed to save.")
+        if point_count > MAX_DRAWING_POINTS:
+            raise HTTPException(status_code=400, detail=f"A drawing can contain up to {MAX_DRAWING_POINTS:,} points.")
         color = stroke.get("color")
         stroke_width = stroke.get("width")
         clean_strokes.append({

@@ -5,6 +5,8 @@ import { Ionicons } from "@expo/vector-icons";
 
 export const DRAWING_WIDTH = 900;
 export const DRAWING_HEIGHT = 1200;
+export const MAX_DRAWING_STROKES = 500;
+export const MAX_DRAWING_POINTS = 10000;
 
 const COLORS = ["#101828", "#635BFF", "#2563EB", "#DC2626"];
 const WIDTHS = [5, 12, 20];
@@ -110,6 +112,7 @@ export function HandwritingCanvas({ strokes, onChange, paperStyle = "lined", onP
   const [undoStack, setUndoStackState] = useState([]);
   const [redoStack, setRedoStackState] = useState([]);
   const strokesRef = useRef(strokes);
+  const pointCountRef = useRef(strokes.reduce((total, stroke) => total + (stroke.points?.length || 0), 0));
   const colorRef = useRef(color);
   const widthRef = useRef(strokeWidth);
   const toolRef = useRef(tool);
@@ -121,7 +124,10 @@ export function HandwritingCanvas({ strokes, onChange, paperStyle = "lined", onP
   const lastPenInputRef = useRef(0);
   const canvasRef = useRef(null);
 
-  useEffect(() => { strokesRef.current = strokes; }, [strokes]);
+  useEffect(() => {
+    strokesRef.current = strokes;
+    pointCountRef.current = strokes.reduce((total, stroke) => total + (stroke.points?.length || 0), 0);
+  }, [strokes]);
   useEffect(() => { colorRef.current = color; }, [color]);
   useEffect(() => { widthRef.current = strokeWidth; }, [strokeWidth]);
   useEffect(() => { toolRef.current = tool; }, [tool]);
@@ -129,39 +135,29 @@ export function HandwritingCanvas({ strokes, onChange, paperStyle = "lined", onP
   useEffect(() => {
     if (!active || Platform.OS !== "web" || typeof document === "undefined") return undefined;
 
-    const previousBodyUserSelect = document.body.style.userSelect;
-    const previousBodyWebkitUserSelect = document.body.style.webkitUserSelect;
-    const previousRootUserSelect = document.documentElement.style.userSelect;
-    const previousRootWebkitUserSelect = document.documentElement.style.webkitUserSelect;
-    document.body.style.userSelect = "none";
-    document.body.style.webkitUserSelect = "none";
-    document.documentElement.style.userSelect = "none";
-    document.documentElement.style.webkitUserSelect = "none";
-
-    const preventSelection = (event) => event.preventDefault();
     const preventCanvasGesture = (event) => {
       if (canvasRef.current?.contains?.(event.target)) event.preventDefault();
     };
-    document.addEventListener("selectstart", preventSelection, { passive: false });
-    document.addEventListener("dragstart", preventSelection, { passive: false });
+    document.addEventListener("selectstart", preventCanvasGesture, { passive: false });
+    document.addEventListener("dragstart", preventCanvasGesture, { passive: false });
     document.addEventListener("contextmenu", preventCanvasGesture, { passive: false });
     document.addEventListener("touchstart", preventCanvasGesture, { passive: false });
     document.addEventListener("touchmove", preventCanvasGesture, { passive: false });
 
     return () => {
-      document.body.style.userSelect = previousBodyUserSelect;
-      document.body.style.webkitUserSelect = previousBodyWebkitUserSelect;
-      document.documentElement.style.userSelect = previousRootUserSelect;
-      document.documentElement.style.webkitUserSelect = previousRootWebkitUserSelect;
-      document.removeEventListener("selectstart", preventSelection);
-      document.removeEventListener("dragstart", preventSelection);
+      document.removeEventListener("selectstart", preventCanvasGesture);
+      document.removeEventListener("dragstart", preventCanvasGesture);
       document.removeEventListener("contextmenu", preventCanvasGesture);
       document.removeEventListener("touchstart", preventCanvasGesture);
       document.removeEventListener("touchmove", preventCanvasGesture);
     };
   }, [active]);
 
-  const setStrokes = (next) => { strokesRef.current = next; onChange(next); };
+  const setStrokes = (next) => {
+    strokesRef.current = next;
+    pointCountRef.current = next.reduce((total, stroke) => total + (stroke.points?.length || 0), 0);
+    onChange(next);
+  };
   const setUndoStack = (next) => { undoRef.current = next; setUndoStackState(next); };
   const setRedoStack = (next) => { redoRef.current = next; setRedoStackState(next); };
   const setTool = (next) => { toolRef.current = next; setToolState(next); };
@@ -204,6 +200,10 @@ export function HandwritingCanvas({ strokes, onChange, paperStyle = "lined", onP
       return;
     }
     const snapshot = strokesRef.current;
+    if (toolRef.current === "pen" && (snapshot.length >= MAX_DRAWING_STROKES || pointCountRef.current >= MAX_DRAWING_POINTS)) {
+      gestureRef.current = { ignore: true };
+      return;
+    }
     rememberState(snapshot);
     gestureRef.current = { start: point, ignore: false };
     lastTapRef.current = { time: now, point, snapshot };
@@ -221,7 +221,14 @@ export function HandwritingCanvas({ strokes, onChange, paperStyle = "lined", onP
     const active = current[current.length - 1];
     const previous = active.points[active.points.length - 1];
     if (Math.hypot(point[0] - previous[0], point[1] - previous[1]) < 1.5) return;
-    setStrokes([...current.slice(0, -1), { ...active, points: [...active.points, ...interpolatePoints(previous, point)] }]);
+    const remainingPoints = MAX_DRAWING_POINTS - pointCountRef.current;
+    if (remainingPoints <= 0) {
+      gestureRef.current = { ignore: true };
+      return;
+    }
+    const addedPoints = interpolatePoints(previous, point).slice(0, remainingPoints);
+    setStrokes([...current.slice(0, -1), { ...active, points: [...active.points, ...addedPoints] }]);
+    if (addedPoints.length >= remainingPoints) gestureRef.current = { ignore: true };
   };
 
   const responder = useMemo(() => PanResponder.create({
@@ -258,6 +265,11 @@ export function HandwritingCanvas({ strokes, onChange, paperStyle = "lined", onP
   };
 
   const selectionBlock = Platform.OS === "web" ? { userSelect: "none", WebkitUserSelect: "none", WebkitTouchCallout: "none" } : undefined;
+  const pointCount = useMemo(
+    () => strokes.reduce((total, stroke) => total + (stroke.points?.length || 0), 0),
+    [strokes],
+  );
+  const drawingLimitReached = strokes.length >= MAX_DRAWING_STROKES || pointCount >= MAX_DRAWING_POINTS;
   return (
     <View style={selectionBlock}>
       <View className="flex-row items-center justify-between mb-3">
@@ -354,6 +366,14 @@ export function HandwritingCanvas({ strokes, onChange, paperStyle = "lined", onP
           <Text selectable={false} className={`font-bodyMed text-xs ${strokes.length ? "text-danger" : "text-inkfaint"}`}>Clear</Text>
         </TouchableOpacity>
       </View>
+      {drawingLimitReached && (
+        <View className="flex-row items-start bg-peach rounded-xl px-3 py-2 mt-3">
+          <Ionicons name="information-circle-outline" size={16} color="#B54708" />
+          <Text selectable={false} className="font-body text-[11px] text-peachDeep flex-1 ml-2">
+            This page is full. Erase or undo some ink before continuing. Your current drawing can still be saved.
+          </Text>
+        </View>
+      )}
     </View>
   );
 }
