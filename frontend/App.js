@@ -27,7 +27,7 @@ const PAGE_COPY = {
   tasks: { title: "Tasks", subtitle: "Track every action item in one place" },
 };
 
-function RelayApp() {
+function LucentApp() {
   const [fontsLoaded] = useFonts({
     SpaceGrotesk_700Bold,
     SpaceGrotesk_500Medium,
@@ -49,6 +49,7 @@ function RelayApp() {
   const [activeTag, setActiveTag] = useState(null);
   const [selected, setSelected] = useState(null);
   const [composing, setComposing] = useState(false);
+  const [composeMode, setComposeMode] = useState("type");
   const [pendingDeleteId, setPendingDeleteId] = useState(null);
   const [deleteError, setDeleteError] = useState(null);
 
@@ -120,6 +121,11 @@ function RelayApp() {
     refreshStats();
   };
 
+  const openComposer = (mode = "type") => {
+    setComposeMode(mode);
+    setComposing(true);
+  };
+
   const handleNoteUpdated = (updated) => {
     setNotes((current) => current.map((note) => note.id === updated.id ? updated : note));
     setSelected((current) => current?.id === updated.id ? updated : current);
@@ -163,10 +169,10 @@ function RelayApp() {
       </View>
       <Text className="font-displayMed text-base text-ink mt-4">{notes.length ? "No matching notes" : "Create your first note"}</Text>
       <Text className="font-body text-sm text-inkfaint text-center mt-1 max-w-md">
-        {notes.length ? "Try a different search term or clear the selected topic." : "Add an update, meeting note, or decision. Relay will organize it into a summary, topics, and action items."}
+        {notes.length ? "Try a different search term or clear the selected topic." : "Add an update, meeting note, or decision. Lucent will organize it into a summary, topics, and action items."}
       </Text>
       {!notes.length && (
-        <TouchableOpacity onPress={() => setComposing(true)} className="bg-flare h-10 px-4 rounded-xl flex-row items-center justify-center mt-5">
+        <TouchableOpacity onPress={() => openComposer("type")} className="bg-flare h-10 px-4 rounded-xl flex-row items-center justify-center mt-5">
           <Ionicons name="add" size={19} color="#FFFFFF" />
           <Text className="font-bodyMed text-sm text-white ml-1.5">Create note</Text>
         </TouchableOpacity>
@@ -197,7 +203,7 @@ function RelayApp() {
             subtitle={activeTag ? `Showing notes tagged “${activeTag}”` : page.subtitle}
             search={search}
             onSearchChange={setSearch}
-            onNewNote={() => setComposing(true)}
+            onNewNote={() => openComposer("type")}
             showSearch={view !== "overview"}
             compact={!isDesktop}
             connected={connected}
@@ -218,8 +224,8 @@ function RelayApp() {
                 loading={loading}
                 recentNotes={notes}
                 onOpenNote={setSelected}
-                onNewNote={() => setComposing(true)}
-                onViewTasks={() => selectView("tasks")}
+                onNewNote={() => openComposer("type")}
+                onNewDrawing={() => openComposer("draw")}
                 compact={!isDesktop}
               />
             )}
@@ -239,11 +245,11 @@ function RelayApp() {
             {view === "tasks" && <TasksView notes={filteredNotes} onNoteUpdated={handleNoteUpdated} onOpenNote={setSelected} />}
           </ScrollView>
 
-          {!isDesktop && <BottomNav view={view} onSelectView={selectView} onNewNote={() => setComposing(true)} />}
+          {!isDesktop && <BottomNav view={view} onSelectView={selectView} onNewNote={() => openComposer("type")} />}
         </View>
       </View>
 
-      <ComposeSheet visible={composing} onClose={() => setComposing(false)} onCreated={handleCreated} />
+      <ComposeSheet visible={composing} initialMode={composeMode} onClose={() => setComposing(false)} onCreated={handleCreated} />
       <NoteDetailModal note={selected} onClose={() => setSelected(null)} onNoteUpdated={handleNoteUpdated} />
       <ConfirmDialog
         visible={!!pendingDeleteId}
@@ -257,5 +263,5 @@ function RelayApp() {
 }
 
 export default function App() {
-  return <SafeAreaProvider><RelayApp /></SafeAreaProvider>;
+  return <SafeAreaProvider><LucentApp /></SafeAreaProvider>;
 }

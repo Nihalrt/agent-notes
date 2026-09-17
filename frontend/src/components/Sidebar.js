@@ -50,10 +50,10 @@ export function Sidebar({
     <View className="w-64 bg-shell h-full px-4 py-6">
       <View className="flex-row items-center px-2 mb-8">
         <View className="w-10 h-10 rounded-xl bg-flare items-center justify-center mr-3">
-          <Text className="font-display text-base text-white">R</Text>
+          <Text className="font-display text-base text-white">L</Text>
         </View>
         <View>
-          <Text className="font-display text-xl text-white tracking-tight">Relay</Text>
+          <Text className="font-display text-xl text-white tracking-tight">Lucent</Text>
           <Text className="font-body text-[11px] text-shellFaint">Knowledge workspace</Text>
         </View>
       </View>

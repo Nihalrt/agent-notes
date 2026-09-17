@@ -21,6 +21,11 @@ export function extractSummary(markdown) {
 }
 
 export function extractTitle(raw = "") {
+  const firstLine = raw.split(/\r?\n/).find((line) => line.trim());
+  if (firstLine && raw.includes("\n")) {
+    const cleanLine = firstLine.replace(/^#+\s*/, "").trim();
+    return cleanLine.length <= 64 ? cleanLine : `${cleanLine.slice(0, 61).trim()}…`;
+  }
   const clean = raw.replace(/\s+/g, " ").trim();
   if (!clean) return "Untitled note";
   const firstSentence = clean.split(/(?<=[.!?])\s/)[0];

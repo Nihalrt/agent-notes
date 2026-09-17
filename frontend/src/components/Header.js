@@ -38,7 +38,7 @@ export function Header({
           <View className="flex-row items-center">
             {compact && (
               <View className="w-8 h-8 rounded-lg bg-flare items-center justify-center mr-2.5">
-                <Text className="font-display text-xs text-white">R</Text>
+                <Text className="font-display text-xs text-white">L</Text>
               </View>
             )}
             <View className="flex-1 min-w-0">
