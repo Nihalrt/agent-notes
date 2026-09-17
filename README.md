@@ -1,6 +1,8 @@
-# Relay
+# Lucent
 
-Relay turns unstructured notes into summaries, action items, topic tags, and relevant historical context. It runs as a responsive web application and an Expo application for iOS and Android.
+Lucent turns unstructured notes into summaries, action items, topic tags, and relevant historical context. It runs as a responsive web application and an Expo application for iOS and Android.
+
+It also supports handwritten notes. A drawing can be created with an Apple Pencil, another stylus, a finger, or a mouse. Drawings are stored as vector strokes rather than screenshots, so they remain clear when shown at different screen sizes. Gemini reads the handwriting, and the recognized text then follows the same summary, action-item, tag, embedding, and historical-context process as a typed note.
 
 ## Main parts
 
@@ -54,6 +56,21 @@ npx expo start
 
 Press `w` for the browser or `i` for the iOS Simulator. Expo automatically gives a physical phone or simulator the correct local computer address; the source code does not contain a fixed Wi-Fi IP.
 
+## Handwritten notes
+
+1. Open Lucent and select **Start drawing**, or open **New note** and select **Draw**.
+2. Add an optional title.
+3. Write in the lined area with an Apple Pencil, stylus, finger, or mouse.
+4. Choose lined, grid, dotted, or blank paper.
+5. Choose black, purple, blue, or red ink and select Fine, Pen, or Marker width.
+6. Select **Full page** for a larger portrait notebook and **Minimize** to return to the note sheet without losing your work.
+7. Select Pen or Eraser. A quick double-tap on the page also switches between the two tools.
+8. Use Undo, Redo, or Clear when needed, then select **Save drawing**.
+
+The backend validates drawing size and content, renders a temporary clean image in memory, and asks Gemini Vision to transcribe the handwriting. The image is not stored. The recognized text is saved with the vector drawing and processed like every other note. Each new drawing uses a portrait internal canvas, which lets the same note scale correctly on a phone, tablet, and desktop. Saved drawings are currently view-only; editing an existing drawing can be added as a later feature.
+
+The canvas blocks browser text selection, disables page gestures while ink is active, rejects multi-touch input, and temporarily ignores finger input after a stylus event. These controls reduce accidental palm input. Apple Pencil hardware double-tap is not exposed consistently by browsers or Expo Go, so the canvas provides an in-app double-tap gesture and a permanent Eraser button. Direct hardware double-tap support requires a custom iOS build with a PencilKit native module.
+
 ## No-cost deployment
 
 The supported deployment structure is:
@@ -92,10 +109,12 @@ Set `EXPO_PUBLIC_API_BASE` in `.github/workflows/deploy-pages.yml` to the genera
 
 ## Mobile release path
 
-The same interface is prepared for iOS and Android. A store release can be produced later with Expo Application Services. The configured application identifiers are:
+The same codebase is prepared for web, iOS, and Android. On an iPhone or iPad, install Expo Go, start the project with `npx expo start`, and scan the QR code while the mobile device and development computer are on the same network. Apple Pencil input is available on supported iPads through the same drawing canvas.
 
-- iOS: `com.nihalrt.relaynotes`
-- Android: `com.nihalrt.relaynotes`
+A distributable store build can be produced later with Expo Application Services. The configured application identifiers are:
+
+- iOS: `com.nihalrt.lucentnotes`
+- Android: `com.nihalrt.lucentnotes`
 
 Store publication is separate from the free web deployment and may require Apple or Google developer-account fees.
 

@@ -3,6 +3,7 @@ import { View, Text, Pressable, TouchableOpacity } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { extractSummary, extractTitle } from "./MarkdownView";
 import { TagChip } from "./TagChip";
+import { DrawingPreview } from "./HandwritingCanvas";
 
 export function NoteCard({ note, onPress, onRequestDelete, widthPct = "100%" }) {
   const preview = extractSummary(note.processed);
@@ -28,7 +29,7 @@ export function NoteCard({ note, onPress, onRequestDelete, widthPct = "100%" }) 
     >
       <View className="flex-row items-start justify-between mb-4">
         <View className="w-9 h-9 rounded-xl bg-flareSoft items-center justify-center">
-          <Ionicons name="document-text-outline" size={18} color="#635BFF" />
+          <Ionicons name={note.drawing ? "pencil-outline" : "document-text-outline"} size={18} color="#635BFF" />
         </View>
         <TouchableOpacity
           accessibilityLabel="Delete note"
@@ -44,7 +45,13 @@ export function NoteCard({ note, onPress, onRequestDelete, widthPct = "100%" }) 
       </View>
 
       <Text className="font-displayMed text-base text-ink leading-5 mb-2" numberOfLines={2}>{extractTitle(note.raw)}</Text>
-      <Text className="font-body text-sm text-inkfaint leading-5" numberOfLines={3}>{preview}</Text>
+      {note.drawing ? (
+        <View className="border border-line rounded-xl mt-1">
+          <DrawingPreview drawing={note.drawing} height={150} />
+        </View>
+      ) : (
+        <Text className="font-body text-sm text-inkfaint leading-5" numberOfLines={3}>{preview}</Text>
+      )}
 
       {!!note.tags?.length && (
         <View className="flex-row flex-wrap mt-4 -mb-1">
@@ -67,7 +74,7 @@ export function NoteCard({ note, onPress, onRequestDelete, widthPct = "100%" }) 
             <Text className="font-bodyMed text-[11px] text-inkfaint">{doneCount}/{items.length}</Text>
           </View>
         ) : (
-          <Text className="font-body text-[11px] text-inkfaint">No tasks</Text>
+          <Text className="font-body text-[11px] text-inkfaint">{note.drawing ? "Handwritten" : "No tasks"}</Text>
         )}
       </View>
     </Pressable>

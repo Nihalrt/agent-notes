@@ -2,6 +2,7 @@ import os
 import re
 import uuid
 import math
+from io import BytesIO
 from datetime import datetime, timedelta
 from typing import List, Optional
 from dotenv import load_dotenv
@@ -15,8 +16,9 @@ from sqlalchemy import (
 from sqlalchemy.orm import sessionmaker, declarative_base
 from google import genai
 from google.genai import types as genai_types
+from PIL import Image, ImageDraw
 
-load_dotenv()  # picks up backend/.env for local dev; Render sets real env vars directly
+load_dotenv()  # picks up backend/.env locally; Vercel supplies deployment variables
 
 # 1. LLM CONFIGURATION — Gemini's free tier (no credit card required, just a
 # Google account at aistudio.google.com/apikey). Uses the current
@@ -27,7 +29,7 @@ if not GEMINI_API_KEY:
     raise RuntimeError(
         "GEMINI_API_KEY is not set. Get a free key at "
         "https://aistudio.google.com/apikey and put it in backend/.env "
-        "(GEMINI_API_KEY=...) for local dev, or in your Render env vars."
+        "(GEMINI_API_KEY=...) for local development, or in your Vercel project variables."
     )
 genai_client = genai.Client(api_key=GEMINI_API_KEY)
 GENERATION_MODEL = "gemini-2.5-flash"
@@ -52,7 +54,7 @@ def run_gemini_agent(system_instruction: str, user_prompt: str) -> str:
 
 # 3. DATABASE SETUP (POSTGRESQL)
 # DATABASE_URL comes from the environment in deployment (e.g. a Neon
-# connection string set on Render); falls back to the local docker-compose
+# connection string set on Vercel); falls back to the local docker-compose
 # Postgres for development.
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
@@ -75,6 +77,7 @@ class DBNote(Base):
     tags = Column(JSON)
     action_items = Column(JSON)
     embedding = Column(JSON)
+    drawing = Column(JSON)
 
 Base.metadata.create_all(bind=engine)
 
@@ -84,6 +87,7 @@ with engine.begin() as conn:
     conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS tags JSON"))
     conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS action_items JSON"))
     conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS embedding JSON"))
+    conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS drawing JSON"))
 
 # How close a past note must be to count as "relevant" (cosine distance:
 # 0.0 = identical, ~1.0 = unrelated). Start at 0.3. Watch the [RAG] debug
@@ -194,11 +198,12 @@ def serialize_note(row: "DBNote"):
         "created_at": row.created_at,
         "tags": row.tags or [],
         "action_items": action_items or [],
+        "drawing": row.drawing,
     }
 
 
 # 5. INITIALIZE FASTAPI & CORS
-app = FastAPI(title="Relay Notes API", version="1.0.0")
+app = FastAPI(title="Lucent Notes API", version="1.0.0")
 
 allowed_origins = [
     origin.strip()
@@ -220,10 +225,123 @@ class NoteRequest(BaseModel):
     content: str
 
 
+class DrawingNoteRequest(BaseModel):
+    title: str = "Untitled sketch"
+    drawing: dict
+
+
+MAX_DRAWING_STROKES = 500
+MAX_DRAWING_POINTS = 10000
+
+
+def sanitize_drawing(drawing: dict):
+    """Validate and compact a client drawing before it reaches PostgreSQL."""
+    width = drawing.get("width", 900)
+    height = drawing.get("height", 1200)
+    strokes = drawing.get("strokes", [])
+    paper = drawing.get("paper", "lined")
+    if (width, height) not in {(900, 1200), (1000, 700)} or not isinstance(strokes, list):
+        raise HTTPException(status_code=400, detail="The drawing format is invalid.")
+    if len(strokes) > MAX_DRAWING_STROKES:
+        raise HTTPException(status_code=400, detail=f"A drawing can contain up to {MAX_DRAWING_STROKES} strokes.")
+    if paper not in {"lined", "grid", "dotted", "blank"}:
+        paper = "lined"
+
+    clean_strokes = []
+    point_count = 0
+    allowed_colors = {"#101828", "#635BFF", "#2563EB", "#DC2626"}
+    allowed_widths = {5, 12, 20}
+    for stroke in strokes:
+        if not isinstance(stroke, dict) or not isinstance(stroke.get("points"), list):
+            continue
+        points = []
+        for point in stroke["points"]:
+            if not isinstance(point, list) or len(point) != 2:
+                continue
+            try:
+                x, y = float(point[0]), float(point[1])
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(x) and math.isfinite(y):
+                points.append([round(min(width, max(0, x)), 2), round(min(height, max(0, y)), 2)])
+        if not points:
+            continue
+        point_count += len(points)
+        if point_count > MAX_DRAWING_POINTS:
+            raise HTTPException(status_code=400, detail=f"A drawing can contain up to {MAX_DRAWING_POINTS:,} points.")
+        color = stroke.get("color")
+        stroke_width = stroke.get("width")
+        clean_strokes.append({
+            "color": color if color in allowed_colors else "#101828",
+            "width": stroke_width if stroke_width in allowed_widths else 5,
+            "points": points,
+        })
+
+    if not clean_strokes:
+        raise HTTPException(status_code=400, detail="Draw something before saving.")
+    return {"width": width, "height": height, "paper": paper, "strokes": clean_strokes}
+
+
+def drawing_to_png(drawing: dict) -> bytes:
+    """Render vector ink to a clean image for handwriting recognition."""
+    width, height = drawing["width"], drawing["height"]
+    image = Image.new("RGB", (width, height), "white")
+    canvas = ImageDraw.Draw(image)
+    for stroke in drawing["strokes"]:
+        points = [(round(point[0]), round(point[1])) for point in stroke["points"]]
+        ink_width = max(3, round(stroke["width"] * 1.25))
+        if len(points) == 1:
+            x, y = points[0]
+            radius = max(2, ink_width // 2)
+            canvas.ellipse((x - radius, y - radius, x + radius, y + radius), fill="#101828")
+        else:
+            canvas.line(points, fill="#101828", width=ink_width, joint="curve")
+    output = BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    return output.getvalue()
+
+
+def recognize_handwriting(title: str, drawing: dict) -> str:
+    """Use Gemini vision to convert the handwritten page into plain text."""
+    image_part = genai_types.Part.from_bytes(
+        data=drawing_to_png(drawing),
+        mime_type="image/png",
+    )
+    prompt = f"""Transcribe the handwriting in this note image accurately.
+The user supplied this optional title: {title}
+
+Rules:
+- Return only the words you can read from the handwritten page.
+- Preserve line breaks and simple lists.
+- Do not describe the paper, ink, shapes, arrows, or layout.
+- Do not invent unclear words.
+- If there are no readable words, return exactly: No readable handwriting detected."""
+    try:
+        response = genai_client.models.generate_content(
+            model=GENERATION_MODEL,
+            contents=[image_part, prompt],
+        )
+        transcript = (response.text or "").strip()
+    except Exception as error:
+        print(f"Handwriting recognition failed: {error}")
+        raise HTTPException(
+            status_code=503,
+            detail="The handwriting could not be recognized. Please try again.",
+        ) from error
+    return transcript or "No readable handwriting detected."
+
+
+@app.post("/notes/drawings")
+def create_drawing_note(request: DrawingNoteRequest):
+    title = request.title.strip()[:120] or "Untitled sketch"
+    drawing = sanitize_drawing(request.drawing)
+    transcript = recognize_handwriting(title, drawing)
+    raw_text = f"{title}\n\n{transcript}"
+    return process_note_content(raw_text, drawing=drawing)
+
+
 # 7. PROCESS ENDPOINT (THE AGENT ORCHESTRATOR WITH THRESHOLDED RAG & PROMPT HARDENING)
-@app.post("/notes/process")
-def process_note(request: NoteRequest):
-    raw_text = request.content
+def process_note_content(raw_text: str, drawing=None):
     if not raw_text.strip():
         raise HTTPException(status_code=400, detail="Note content cannot be empty.")
 
@@ -350,6 +468,8 @@ def process_note(request: NoteRequest):
     # and derive topic tags for filtering/dashboard.
     action_items = parse_action_items(processed_result)
     tags = generate_tags(raw_text)
+    if drawing and "handwritten" not in tags:
+        tags = ["handwritten", *tags][:4]
 
     # E. SAVE TO POSTGRES
     note_id = str(uuid.uuid4())
@@ -362,9 +482,11 @@ def process_note(request: NoteRequest):
             tags=tags,
             action_items=action_items,
             embedding=query_vector,
+            drawing=drawing,
         )
         db.add(new_note)
         db.commit()
+        db.refresh(new_note)
     except Exception as e:
         db.rollback()
         print(f"Error saving to Postgres: {e}")
@@ -375,12 +497,12 @@ def process_note(request: NoteRequest):
     finally:
         db.close()
 
-    return {
-        "note_id": note_id,
-        "processed_note": processed_result,
-        "tags": tags,
-        "action_items": action_items,
-    }
+    return serialize_note(new_note)
+
+
+@app.post("/notes/process")
+def process_note(request: NoteRequest):
+    return process_note_content(request.content)
 
 
 # 8. HEALTH CHECK — lets the frontend show a live connection indicator.

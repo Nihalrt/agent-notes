@@ -22,7 +22,7 @@ function StatCard({ config, value, compact }) {
     </View>
   );
 }
-export function Dashboard({ stats, loading, recentNotes, onOpenNote, onNewNote, onViewTasks, compact }) {
+export function Dashboard({ stats, loading, recentNotes, onOpenNote, onNewNote, onNewDrawing, compact }) {
   return (
     <View>
       <View className={`${compact ? "p-5" : "p-7"} bg-shell rounded-3xl mb-5 overflow-hidden`}>
@@ -30,16 +30,16 @@ export function Dashboard({ stats, loading, recentNotes, onOpenNote, onNewNote, 
           <Text className="font-bodyMed text-xs text-lilac mb-2">YOUR WORKSPACE</Text>
           <Text className="font-display text-2xl md:text-3xl text-white leading-9">Turn quick notes into clear next steps.</Text>
           <Text className="font-body text-sm text-shellFaint mt-2 leading-5">
-            Capture an update, decision, or meeting note. Relay organizes the summary, tasks, topics, and related history.
+            Capture an update, decision, or meeting note. Lucent organizes the summary, tasks, topics, and related history.
           </Text>
           <View className="flex-row mt-5">
             <TouchableOpacity onPress={onNewNote} activeOpacity={0.82} className="bg-flare rounded-xl px-4 h-10 flex-row items-center justify-center">
               <Ionicons name="add" size={19} color="#FFFFFF" />
               <Text className="font-bodyMed text-sm text-white ml-1.5">Create note</Text>
             </TouchableOpacity>
-            <TouchableOpacity onPress={onViewTasks} activeOpacity={0.72} className="border border-shellLine rounded-xl px-4 h-10 flex-row items-center justify-center ml-2">
-              <Text className="font-bodyMed text-sm text-white">View tasks</Text>
-              <Ionicons name="arrow-forward" size={17} color="#FFFFFF" style={{ marginLeft: 7 }} />
+            <TouchableOpacity onPress={onNewDrawing} activeOpacity={0.72} className="border border-shellLine rounded-xl px-4 h-10 flex-row items-center justify-center ml-2">
+              <Ionicons name="pencil-outline" size={17} color="#FFFFFF" />
+              <Text className="font-bodyMed text-sm text-white ml-2">Start drawing</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -67,13 +67,13 @@ export function Dashboard({ stats, loading, recentNotes, onOpenNote, onNewNote, 
               className={`flex-row items-center py-3 ${index ? "border-t border-line" : ""}`}
             >
               <View className="w-9 h-9 rounded-xl bg-canvas items-center justify-center mr-3">
-                <Ionicons name="document-text-outline" size={18} color="#667085" />
+                <Ionicons name={note.drawing ? "pencil-outline" : "document-text-outline"} size={18} color="#667085" />
               </View>
               <View className="flex-1 min-w-0">
                 <Text className="font-bodyMed text-sm text-ink" numberOfLines={1}>{extractTitle(note.raw)}</Text>
                 <Text className="font-body text-[11px] text-inkfaint mt-1">
                   {note.createdAt.toLocaleDateString(undefined, { month: "short", day: "numeric" })}
-                  {note.actionItems?.length ? ` · ${note.actionItems.filter((item) => !item.done).length} open tasks` : " · No tasks"}
+                  {note.drawing ? " · Handwritten" : note.actionItems?.length ? ` · ${note.actionItems.filter((item) => !item.done).length} open tasks` : " · No tasks"}
                 </Text>
               </View>
               <Ionicons name="chevron-forward" size={17} color="#98A2B3" />

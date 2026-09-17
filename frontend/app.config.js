@@ -3,18 +3,18 @@
 // local dev (`expo start --web`) still serves from "/" as before.
 module.exports = ({ config }) => ({
   ...config,
-  name: "Relay",
+  name: "Lucent",
   slug: "agent-notes",
   version: "1.0.0",
-  scheme: "relaynotes",
+  scheme: "lucentnotes",
   orientation: "portrait",
   userInterfaceStyle: "light",
   ios: {
-    bundleIdentifier: "com.nihalrt.relaynotes",
+    bundleIdentifier: "com.nihalrt.lucentnotes",
     supportsTablet: true,
   },
   android: {
-    package: "com.nihalrt.relaynotes",
+    package: "com.nihalrt.lucentnotes",
   },
   experiments: {
     ...(config.experiments || {}),

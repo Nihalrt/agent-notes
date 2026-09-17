@@ -11,9 +11,16 @@ const expoHost = (
   ""
 ).split(":")[0];
 
+// When the development website is opened from another device, `localhost`
+// refers to that device rather than the computer running the API. Reuse the
+// page hostname so iPad and phone browsers can reach the local backend.
+const webHost = typeof globalThis.location?.hostname === "string"
+  ? globalThis.location.hostname
+  : "localhost";
+
 const localApiBase =
   Platform.OS === "web"
-    ? "http://localhost:8001"
+    ? `http://${webHost}:8001`
     : `http://${expoHost || "localhost"}:8001`;
 
 export const API_BASE = process.env.EXPO_PUBLIC_API_BASE || localApiBase;
@@ -26,6 +33,7 @@ function mapNote(row) {
     createdAt: new Date(row.created_at),
     tags: row.tags || [],
     actionItems: row.action_items || [],
+    drawing: row.drawing || null,
   };
 }
 
@@ -44,6 +52,11 @@ export async function processNote(content) {
     tags: res.data.tags,
     action_items: res.data.action_items,
   });
+}
+
+export async function createDrawingNote(title, drawing) {
+  const res = await axios.post(`${API_BASE}/notes/drawings`, { title, drawing });
+  return mapNote(res.data);
 }
 
 // Persist action-item checkbox state. Returns the updated note.

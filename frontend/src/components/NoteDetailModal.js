@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from "react";
-import { View, Text, TouchableOpacity, Modal, ScrollView } from "react-native";
+import { View, Text, TouchableOpacity, Modal, ScrollView, useWindowDimensions } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { MarkdownView, stripSection, extractTitle } from "./MarkdownView";
 import { TagChip } from "./TagChip";
 import { updateActionItems } from "../api";
+import { DrawingPreview } from "./HandwritingCanvas";
 
 function Checkbox({ item, onToggle }) {
   return (
@@ -16,6 +17,7 @@ function Checkbox({ item, onToggle }) {
   );
 }
 export function NoteDetailModal({ note, onClose, onNoteUpdated }) {
+  const { width: screenWidth } = useWindowDimensions();
   const [items, setItems] = useState([]);
   const [saveError, setSaveError] = useState(null);
 
@@ -42,6 +44,9 @@ export function NoteDetailModal({ note, onClose, onNoteUpdated }) {
 
   const doneCount = items.filter((item) => item.done).length;
   const body = stripSection(note.processed, "Action Items");
+  const recognizedText = note.drawing
+    ? note.raw.split("\n").slice(1).join("\n").trim()
+    : "";
 
   return (
     <Modal visible transparent animationType="fade" onRequestClose={onClose}>
@@ -67,13 +72,34 @@ export function NoteDetailModal({ note, onClose, onNoteUpdated }) {
               </View>
             )}
 
-            <View className="bg-white rounded-2xl border border-line p-5 mb-4">
-              <View className="flex-row items-center mb-3">
-                <Ionicons name="create-outline" size={18} color="#667085" />
-                <Text className="font-displayMed text-sm text-ink ml-2">Original note</Text>
+            {note.drawing ? (
+              <View>
+                <View className="bg-white rounded-2xl border border-line p-4 mb-4">
+                  <View className="flex-row items-center mb-3 px-1">
+                    <Ionicons name="pencil-outline" size={18} color="#635BFF" />
+                    <Text className="font-displayMed text-sm text-ink ml-2">Handwritten note</Text>
+                  </View>
+                  <View className="border border-line rounded-xl overflow-hidden">
+                    <DrawingPreview drawing={note.drawing} height={Math.min(560, Math.max(300, (screenWidth - 80) * 1.1))} />
+                  </View>
+                </View>
+                <View className="bg-white rounded-2xl border border-line p-5 mb-4">
+                  <View className="flex-row items-center mb-3">
+                    <Ionicons name="scan-outline" size={18} color="#635BFF" />
+                    <Text className="font-displayMed text-sm text-ink ml-2">Recognized handwriting</Text>
+                  </View>
+                  <Text className="font-body text-sm text-ink leading-6">{recognizedText || "No readable handwriting detected."}</Text>
+                </View>
               </View>
-              <Text className="font-body text-sm text-inkfaint leading-6">{note.raw}</Text>
-            </View>
+            ) : (
+              <View className="bg-white rounded-2xl border border-line p-5 mb-4">
+                <View className="flex-row items-center mb-3">
+                  <Ionicons name="create-outline" size={18} color="#667085" />
+                  <Text className="font-displayMed text-sm text-ink ml-2">Original note</Text>
+                </View>
+                <Text className="font-body text-sm text-inkfaint leading-6">{note.raw}</Text>
+              </View>
+            )}
 
             {items.length > 0 && (
               <View className="bg-white rounded-2xl border border-line p-5 mb-4">
