@@ -83,11 +83,12 @@ Base.metadata.create_all(bind=engine)
 
 # create_all() never ALTERs an existing table, and the notes table predates the
 # tags/action_items columns, so add them idempotently for older databases.
-with engine.begin() as conn:
-    conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS tags JSON"))
-    conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS action_items JSON"))
-    conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS embedding JSON"))
-    conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS drawing JSON"))
+if engine.dialect.name == "postgresql":
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS tags JSON"))
+        conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS action_items JSON"))
+        conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS embedding JSON"))
+        conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS drawing JSON"))
 
 # How close a past note must be to count as "relevant" (cosine distance:
 # 0.0 = identical, ~1.0 = unrelated). Start at 0.3. Watch the [RAG] debug
@@ -189,7 +190,7 @@ def serialize_note(row: "DBNote"):
     """Shape a DB row for the API. action_items backfills from the markdown for
     notes created before the column existed, so old notes still get checkboxes."""
     action_items = row.action_items
-    if not action_items:
+    if action_items is None:
         action_items = parse_action_items(row.processed_content)
     return {
         "note_id": row.id,
@@ -240,11 +241,13 @@ def sanitize_drawing(drawing: dict):
     height = drawing.get("height", 1200)
     strokes = drawing.get("strokes", [])
     paper = drawing.get("paper", "lined")
-    if (width, height) not in {(900, 1200), (1000, 700)} or not isinstance(strokes, list):
+    if (type(width) is not int or type(height) is not int
+            or (width, height) not in {(900, 1200), (1000, 700)}
+            or not isinstance(strokes, list)):
         raise HTTPException(status_code=400, detail="The drawing format is invalid.")
     if len(strokes) > MAX_DRAWING_STROKES:
         raise HTTPException(status_code=400, detail=f"A drawing can contain up to {MAX_DRAWING_STROKES} strokes.")
-    if paper not in {"lined", "grid", "dotted", "blank"}:
+    if not isinstance(paper, str) or paper not in {"lined", "grid", "dotted", "blank"}:
         paper = "lined"
 
     clean_strokes = []
@@ -260,20 +263,20 @@ def sanitize_drawing(drawing: dict):
                 continue
             try:
                 x, y = float(point[0]), float(point[1])
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 continue
             if math.isfinite(x) and math.isfinite(y):
+                point_count += 1
+                if point_count > MAX_DRAWING_POINTS:
+                    raise HTTPException(status_code=400, detail=f"A drawing can contain up to {MAX_DRAWING_POINTS:,} points.")
                 points.append([round(min(width, max(0, x)), 2), round(min(height, max(0, y)), 2)])
         if not points:
             continue
-        point_count += len(points)
-        if point_count > MAX_DRAWING_POINTS:
-            raise HTTPException(status_code=400, detail=f"A drawing can contain up to {MAX_DRAWING_POINTS:,} points.")
         color = stroke.get("color")
         stroke_width = stroke.get("width")
         clean_strokes.append({
-            "color": color if color in allowed_colors else "#101828",
-            "width": stroke_width if stroke_width in allowed_widths else 5,
+            "color": color if isinstance(color, str) and color in allowed_colors else "#101828",
+            "width": stroke_width if type(stroke_width) in (int, float) and stroke_width in allowed_widths else 5,
             "points": points,
         })
 
@@ -610,7 +613,8 @@ def stats():
     notes_this_week = 0
 
     for row in rows:
-        items = row.action_items or parse_action_items(row.processed_content) or []
+        items = (row.action_items if row.action_items is not None
+                 else parse_action_items(row.processed_content)) or []
         for item in items:
             if item.get("done"):
                 done_items += 1

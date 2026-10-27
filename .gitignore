@@ -18,3 +18,8 @@ notes-vault/
 .DS_Store
 .vercel
 .env*
+
+!**/.env.example
+__pycache__/
+.venv/
+frontend/dist/
