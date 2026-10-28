@@ -123,3 +123,33 @@ Store publication is separate from the free web deployment and may require Apple
 - Vercel's free Hobby plan has usage, execution-time, and application-size limits.
 - Free hosting is appropriate for testing, demonstrations, and portfolio use. Add monitoring, backups, authentication, and managed secrets before storing sensitive production data.
 - The current application is a single-user workspace. Authentication and per-user data ownership should be added before a public multi-user launch.
+
+## Backend regression tests
+
+From the repository root, with the backend dependencies installed:
+
+```bash
+pip install httpx
+python -m unittest discover -s backend/tests -v
+```
+
+The tests use a temporary in-memory SQLite database and a dummy Gemini key;
+no external database or model requests are made. PostgreSQL-specific startup
+migrations still run only on PostgreSQL and need an integration environment to
+verify. Tests cover cleared-task persistence, drawing validation/rendering,
+point limits, empty note input, and missing notes.
+
+## Security boundary
+
+The current API has no authentication: anyone who can reach it can read,
+create, edit, or delete notes and consume Gemini quota. CORS only controls
+browser access and does not authorize callers. Keep demonstrations free of
+private data and restrict backend access to trusted users until authentication,
+per-user ownership, and rate limits are implemented. Do not embed a shared
+backend secret in the public Expo/web bundle. Restrict `ALLOWED_ORIGINS` for a
+hosted demo; this is an additional browser control, not an access-control system.
+
+Copy `backend/.env.example` to `backend/.env` for local configuration. Real API
+keys and database credentials belong in local environment files or the hosting
+provider's secrets settings, never in Git. Note content and handwriting images
+are sent to Gemini for processing.
