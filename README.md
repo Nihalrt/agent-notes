@@ -1,5 +1,13 @@
 # Lucent
 
+[![Regression tests](https://github.com/Nihalrt/agent-notes/actions/workflows/tests.yml/badge.svg)](https://github.com/Nihalrt/agent-notes/actions/workflows/tests.yml)
+
+**Typed and handwritten notes, organized with applied AI.**  
+[Open web demo](https://nihalrt.github.io/agent-notes/) · [Engineering walkthrough](docs/ENGINEERING.md) · [Run locally](#run-locally) · [Backend tests](#backend-regression-tests)
+
+The demo is a shared workspace without authentication. Use sample notes; note
+text and handwriting are sent to Gemini for processing.
+
 Lucent turns unstructured notes into summaries, action items, topic tags, and relevant historical context. It runs as a responsive web application and an Expo application for iOS and Android.
 
 It also supports handwritten notes. A drawing can be created with an Apple Pencil, another stylus, a finger, or a mouse. Drawings are stored as vector strokes rather than screenshots, so they remain clear when shown at different screen sizes. Gemini reads the handwriting, and the recognized text then follows the same summary, action-item, tag, embedding, and historical-context process as a typed note.
